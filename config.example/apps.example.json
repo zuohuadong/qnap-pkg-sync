@@ -1,0 +1,36 @@
+{
+  "plugins": {
+    "cachechk": "1234567890",
+    "item": [
+      {
+        "name": "Apache83",
+        "version": "2465.83260",
+        "internalName": "Apache83",
+        "platform": [
+          {
+            "platformID": "TS-NASX86_64",
+            "location": "https://example.com/Apache83_2465.83260_x86_64.qpkg",
+            "signature": "abcdef1234567890"
+          },
+          {
+            "platformID": "TS-NASARM_64",
+            "location": "https://example.com/Apache83_2465.83260_arm_64.qpkg",
+            "signature": "1234567890abcdef"
+          }
+        ]
+      },
+      {
+        "name": "OpenList",
+        "version": "4.1.6",
+        "internalName": "OpenList",
+        "platform": [
+          {
+            "platformID": "TS-NASX86_64",
+            "location": "https://example.com/OpenList_4.1.6_x86_64.qpkg",
+            "signature": "fedcba0987654321"
+          }
+        ]
+      }
+    ]
+  }
+}
