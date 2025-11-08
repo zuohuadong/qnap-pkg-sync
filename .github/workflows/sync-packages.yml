@@ -1,9 +1,9 @@
 name: Sync QNAP Packages
 
 on:
-  # 定时任务：每周一 UTC 0:00 (北京时间 8:00) 运行
+  # 定时任务：每天 UTC 23:00 (北京时间 7:00) 运行
   schedule:
-    - cron: '0 0 * * 1'
+    - cron: '0 23 * * *'
 
   # 支持手动触发
   workflow_dispatch:
@@ -100,7 +100,7 @@ jobs:
           WEBDAV_ROOT_PATH=/qnaporg-github
 
           # 上传配置
-          UPLOAD_CONCURRENCY=1
+          UPLOAD_CONCURRENCY=2
           MAX_UPLOAD_FILE_SIZE=1073741824
           EOF
 

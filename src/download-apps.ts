@@ -6,10 +6,17 @@
  * - Signature verification
  * - Proper file naming from URLs
  * - Resume support
+ * - Concurrent downloads (default: 5)
  */
 
 import { join, basename } from 'path';
 import { createHash } from 'crypto';
+
+/**
+ * Default concurrent download limit
+ * Can be overridden with DOWNLOAD_CONCURRENCY environment variable
+ */
+const DEFAULT_DOWNLOAD_CONCURRENCY = 5;
 
 interface Platform {
   platformID: string;
@@ -111,6 +118,45 @@ async function ensureDir(dirPath: string): Promise<void> {
     // Directory doesn't exist, create it
     await Bun.$`mkdir -p ${dirPath}`.quiet();
   }
+}
+
+/**
+ * Execute promises with concurrency limit
+ * Similar to Promise.all but with a maximum concurrency limit
+ * @param tasks Array of promise-returning functions
+ * @param concurrency Maximum number of concurrent tasks
+ */
+async function promiseWithConcurrency<T>(
+  tasks: (() => Promise<T>)[],
+  concurrency: number
+): Promise<T[]> {
+  const results: T[] = [];
+  const executing: Promise<void>[] = [];
+
+  for (let i = 0; i < tasks.length; i++) {
+    const task = tasks[i];
+
+    const promise = (async () => {
+      const result = await task();
+      results[i] = result;
+    })();
+
+    executing.push(promise);
+
+    // Wait if we've reached concurrency limit
+    if (executing.length >= concurrency) {
+      await Promise.race(executing);
+      // Remove completed promises
+      executing.splice(
+        executing.findIndex(p => p === promise),
+        1
+      );
+    }
+  }
+
+  // Wait for all remaining promises to complete
+  await Promise.all(executing);
+  return results;
 }
 
 /**
@@ -307,7 +353,13 @@ export async function downloadAllApps(
   const config: AppsConfig = await configFile.json();
   const apps = config.plugins.item;
 
-  console.log(`Found ${apps.length} apps in config\n`);
+  // Get concurrency setting from environment or use default
+  const concurrency = process.env.DOWNLOAD_CONCURRENCY
+    ? parseInt(process.env.DOWNLOAD_CONCURRENCY, 10)
+    : DEFAULT_DOWNLOAD_CONCURRENCY;
+
+  console.log(`Found ${apps.length} apps in config`);
+  console.log(`Download concurrency: ${concurrency}\n`);
 
   // Create output directory
   await ensureDir(outputDir);
@@ -322,64 +374,79 @@ export async function downloadAllApps(
   // Collect metadata for all downloaded packages
   const packagesMetadata: PackageMetadata[] = [];
 
-  // Download each app
+  // Collect all download tasks
+  interface DownloadTask {
+    app: AppItem;
+    platform: Platform;
+  }
+
+  const downloadTasks: DownloadTask[] = [];
+
+  // Build task list
   for (let i = 0; i < apps.length; i++) {
     const app = apps[i];
-    console.log(`\n[${i + 1}/${apps.length}] Processing: ${app.name} v${app.version}`);
-    console.log(`  Platforms: ${app.platform.length}`);
-
-    // Download each platform version
     for (const platform of app.platform) {
       const filename = getFilenameFromUrl(platform.location);
-      const outputPath = join(outputDir, filename);
 
-      // Skip if already downloaded in this session
+      // Skip if already in task list (duplicate check)
       if (downloadedFiles.has(filename)) {
-        console.log(`\n  ⏭  ${platform.platformID}: Already downloaded (${filename})`);
-        totalSkipped++;
         continue;
       }
+      downloadedFiles.add(filename);
 
-      console.log(`\n  📥 Downloading for ${platform.platformID}...`);
-      console.log(`  URL: ${platform.location}`);
-      console.log(`  File: ${filename}`);
-      console.log(`  Signature: ${platform.signature}`);
+      downloadTasks.push({
+        app,
+        platform,
+      });
+    }
+  }
 
-      // Check if file already exists
-      let fileExists = false;
-      let existingFileSize = 0;
+  console.log(`Total download tasks: ${downloadTasks.length}\n`);
 
-      const existingFile = Bun.file(outputPath);
-      if (await existingFile.exists()) {
-        fileExists = true;
-        existingFileSize = existingFile.size;
-        console.log('  ⏭  File already exists, skipping download...');
-        downloadedFiles.add(filename);
-        totalSkipped++;
-      }
+  // Execute downloads with concurrency
+  const taskFunctions = downloadTasks.map((task, taskIndex) => async () => {
+    const { app, platform } = task;
+    const filename = getFilenameFromUrl(platform.location);
+    const outputPath = join(outputDir, filename);
 
-      let fileSize = existingFileSize;
+    console.log(`\n[${taskIndex + 1}/${downloadTasks.length}] ${app.name} v${app.version} - ${platform.platformID}`);
+    console.log(`  URL: ${platform.location}`);
+    console.log(`  File: ${filename}`);
 
-      // Download the file if it doesn't exist
-      if (!fileExists) {
-        const result = await downloadFile({
-          url: platform.location,
-          outputPath,
-          signature: platform.signature,
-          showProgress: true,
-        });
+    // Check if file already exists
+    const existingFile = Bun.file(outputPath);
+    if (await existingFile.exists()) {
+      const existingFileSize = existingFile.size;
+      console.log('  ⏭  File already exists, skipping download...');
 
-        if (result.success) {
-          console.log(`  ✅ Successfully downloaded: ${filename}`);
-          downloadedFiles.add(filename);
-          totalDownloaded++;
-          fileSize = result.fileSize;
-        } else {
-          console.log(`  ❌ Failed to download: ${result.error}`);
-          totalFailed++;
-          continue; // Skip metadata collection for failed downloads
-        }
-      }
+      // Add metadata for existing file
+      packagesMetadata.push({
+        productName: app.name,
+        version: app.version,
+        architecture: platform.platformID,
+        filename: filename,
+        fileSize: existingFileSize,
+        downloadUrl: platform.location,
+        publishedDate: new Date().toISOString(),
+        downloadDate: new Date().toISOString(),
+        signature: platform.signature,
+      });
+
+      totalSkipped++;
+      return { success: true, skipped: true };
+    }
+
+    // Download the file
+    const result = await downloadFile({
+      url: platform.location,
+      outputPath,
+      signature: platform.signature,
+      showProgress: true,
+    });
+
+    if (result.success) {
+      console.log(`  ✅ Successfully downloaded: ${filename}`);
+      totalDownloaded++;
 
       // Add metadata for this package
       packagesMetadata.push({
@@ -387,14 +454,23 @@ export async function downloadAllApps(
         version: app.version,
         architecture: platform.platformID,
         filename: filename,
-        fileSize: fileSize,
+        fileSize: result.fileSize,
         downloadUrl: platform.location,
-        publishedDate: new Date().toISOString(), // Use current time as we don't have actual publish date
+        publishedDate: new Date().toISOString(),
         downloadDate: new Date().toISOString(),
         signature: platform.signature,
       });
+
+      return { success: true, skipped: false };
+    } else {
+      console.log(`  ❌ Failed to download: ${result.error}`);
+      totalFailed++;
+      return { success: false, skipped: false };
     }
-  }
+  });
+
+  // Execute with concurrency limit
+  await promiseWithConcurrency(taskFunctions, concurrency);
 
   // Save metadata to JSON
   const metadataPath = join(outputDir, 'metadata.json');
@@ -528,7 +604,13 @@ export async function downloadUpdates(
     return;
   }
 
-  console.log(`Found ${apps.length} apps to update\n`);
+  // Get concurrency setting from environment or use default
+  const concurrency = process.env.DOWNLOAD_CONCURRENCY
+    ? parseInt(process.env.DOWNLOAD_CONCURRENCY, 10)
+    : DEFAULT_DOWNLOAD_CONCURRENCY;
+
+  console.log(`Found ${apps.length} apps to update`);
+  console.log(`Download concurrency: ${concurrency}\n`);
 
   // Create output directory
   await ensureDir(outputDir);
@@ -544,67 +626,85 @@ export async function downloadUpdates(
   // Collect metadata for all downloaded packages
   const packagesMetadata: PackageMetadata[] = [];
 
-  // Download each app
-  for (let i = 0; i < apps.length; i++) {
-    const app = apps[i];
-    console.log(`\n[${i + 1}/${apps.length}] Processing: ${app.name} v${app.version}`);
-    console.log(`  Platforms: ${app.platform.length}`);
+  // Collect all download tasks
+  interface DownloadTask {
+    app: AppItem;
+    platform: Platform;
+  }
 
-    let appDownloadSuccess = true;
+  const downloadTasks: DownloadTask[] = [];
 
-    // Download each platform version
+  // Build task list
+  for (const app of apps) {
     for (const platform of app.platform) {
       const filename = getFilenameFromUrl(platform.location);
-      const outputPath = join(outputDir, filename);
 
-      // Skip if already downloaded in this session
+      // Skip if already in task list (duplicate check)
       if (downloadedFiles.has(filename)) {
-        console.log(`\n  ⏭  ${platform.platformID}: Already downloaded (${filename})`);
-        totalSkipped++;
         continue;
       }
+      downloadedFiles.add(filename);
 
-      console.log(`\n  📥 Downloading for ${platform.platformID}...`);
-      console.log(`  URL: ${platform.location}`);
-      console.log(`  File: ${filename}`);
-      console.log(`  Signature: ${platform.signature}`);
+      downloadTasks.push({
+        app,
+        platform,
+      });
+    }
+  }
 
-      // Check if file already exists
-      let fileExists = false;
-      let existingFileSize = 0;
+  console.log(`Total download tasks: ${downloadTasks.length}\n`);
 
-      const existingFile = Bun.file(outputPath);
-      if (await existingFile.exists()) {
-        fileExists = true;
-        existingFileSize = existingFile.size;
-        console.log('  ⏭  File already exists, skipping download...');
-        downloadedFiles.add(filename);
-        totalSkipped++;
-      }
+  // Track which apps were successfully downloaded (all platforms)
+  const appDownloadStatus = new Map<string, boolean>();
+  for (const app of apps) {
+    appDownloadStatus.set(app.internalName || app.name, true);
+  }
 
-      let fileSize = existingFileSize;
+  // Execute downloads with concurrency
+  const taskFunctions = downloadTasks.map((task, taskIndex) => async () => {
+    const { app, platform } = task;
+    const filename = getFilenameFromUrl(platform.location);
+    const outputPath = join(outputDir, filename);
+    const appKey = app.internalName || app.name;
 
-      // Download the file if it doesn't exist
-      if (!fileExists) {
-        const result = await downloadFile({
-          url: platform.location,
-          outputPath,
-          signature: platform.signature,
-          showProgress: true,
-        });
+    console.log(`\n[${taskIndex + 1}/${downloadTasks.length}] ${app.name} v${app.version} - ${platform.platformID}`);
+    console.log(`  URL: ${platform.location}`);
+    console.log(`  File: ${filename}`);
 
-        if (result.success) {
-          console.log(`  ✅ Successfully downloaded: ${filename}`);
-          downloadedFiles.add(filename);
-          totalDownloaded++;
-          fileSize = result.fileSize;
-        } else {
-          console.log(`  ❌ Failed to download: ${result.error}`);
-          totalFailed++;
-          appDownloadSuccess = false;
-          continue; // Skip metadata collection for failed downloads
-        }
-      }
+    // Check if file already exists
+    const existingFile = Bun.file(outputPath);
+    if (await existingFile.exists()) {
+      const existingFileSize = existingFile.size;
+      console.log('  ⏭  File already exists, skipping download...');
+
+      // Add metadata for existing file
+      packagesMetadata.push({
+        productName: app.name,
+        version: app.version,
+        architecture: platform.platformID,
+        filename: filename,
+        fileSize: existingFileSize,
+        downloadUrl: platform.location,
+        publishedDate: new Date().toISOString(),
+        downloadDate: new Date().toISOString(),
+        signature: platform.signature,
+      });
+
+      totalSkipped++;
+      return { success: true, skipped: true, appKey };
+    }
+
+    // Download the file
+    const result = await downloadFile({
+      url: platform.location,
+      outputPath,
+      signature: platform.signature,
+      showProgress: true,
+    });
+
+    if (result.success) {
+      console.log(`  ✅ Successfully downloaded: ${filename}`);
+      totalDownloaded++;
 
       // Add metadata for this package
       packagesMetadata.push({
@@ -612,17 +712,30 @@ export async function downloadUpdates(
         version: app.version,
         architecture: platform.platformID,
         filename: filename,
-        fileSize: fileSize,
+        fileSize: result.fileSize,
         downloadUrl: platform.location,
         publishedDate: new Date().toISOString(),
         downloadDate: new Date().toISOString(),
         signature: platform.signature,
       });
-    }
 
-    // Mark app as successfully downloaded if all platforms succeeded
-    if (appDownloadSuccess) {
-      successfullyDownloadedApps.add(app.internalName || app.name);
+      return { success: true, skipped: false, appKey };
+    } else {
+      console.log(`  ❌ Failed to download: ${result.error}`);
+      totalFailed++;
+      // Mark this app as failed
+      appDownloadStatus.set(appKey, false);
+      return { success: false, skipped: false, appKey };
+    }
+  });
+
+  // Execute with concurrency limit
+  await promiseWithConcurrency(taskFunctions, concurrency);
+
+  // Determine which apps were successfully downloaded (all platforms succeeded)
+  for (const [appKey, success] of appDownloadStatus.entries()) {
+    if (success) {
+      successfullyDownloadedApps.add(appKey);
     }
   }
 

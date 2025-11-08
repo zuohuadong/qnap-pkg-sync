@@ -22,10 +22,10 @@ import { WebDAVClient } from './webdav-client';
 
 /**
  * Default concurrent upload limit
- * Set to 1 for large files (>500MB) to avoid network congestion and system resource issues
+ * Set to 2 to balance upload speed and system resource usage
  * Can be overridden with UPLOAD_CONCURRENCY environment variable
  */
-const DEFAULT_CONCURRENCY = 1;
+const DEFAULT_CONCURRENCY = 2;
 
 /**
  * Upload progress tracking file
