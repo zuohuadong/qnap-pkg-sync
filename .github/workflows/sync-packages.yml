@@ -119,14 +119,28 @@ jobs:
           name: config-apps-json
           path: config/
 
+      - name: 恢复上传进度和元数据
+        if: ${{ !inputs.upload_only }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: metadata
+          path: downloads/
+
       - name: 检查 apps.json 是否恢复成功
         if: ${{ !inputs.upload_only }}
         run: |
           if [ -f config/apps.json ]; then
             app_count=$(jq '.plugins.item | length' config/apps.json)
             echo "✓ 成功恢复之前的 apps.json（包含 $app_count 个软件包）"
+            echo "   将进行增量更新检测"
           else
-            echo "ℹ 未找到之前的 apps.json，这可能是首次运行"
+            echo "ℹ️  未找到之前的 apps.json"
+            echo "   原因可能是："
+            echo "   - 首次运行此工作流"
+            echo "   - Artifact 已过期（保留期 90 天）"
+            echo "   - Artifact 已被手动清理"
+            echo "   本次将获取完整软件包列表并执行完整下载"
           fi
 
       - name: 获取并检查软件包更新
@@ -195,6 +209,51 @@ jobs:
           echo "📊 当前软件包总数: ${{ steps.check_updates.outputs.total_count }}"
           echo ""
           echo "如需强制下载，请使用 force_download 参数手动触发工作流"
+
+      - name: 恢复上传进度和元数据（用于重新下载失败的上传）
+        if: ${{ !inputs.download_only && !inputs.upload_only }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: metadata
+          path: downloads/
+
+      - name: 检查并重新下载未上传的文件
+        if: ${{ !inputs.download_only && !inputs.upload_only && steps.check_updates.outputs.has_updates == 'false' }}
+        run: |
+          echo "🔍 检查是否有下载但未成功上传的文件..."
+
+          # 如果没有 metadata.json，说明没有之前的下载记录
+          if [ ! -f downloads/metadata.json ]; then
+            echo "ℹ 未找到之前的 metadata.json，无需重新下载"
+            exit 0
+          fi
+
+          # 检查downloads目录是否有实际文件
+          qpkg_count=$(ls -1 downloads/*.qpkg 2>/dev/null | wc -l || echo "0")
+
+          if [ "$qpkg_count" -eq 0 ]; then
+            echo "⚠ 发现 metadata.json 但 downloads 目录为空，需要重新下载"
+            metadata_count=$(jq '. | length' downloads/metadata.json)
+            echo "  将重新下载 $metadata_count 个文件"
+
+            # 清空 metadata.json 以强制重新下载
+            rm -f downloads/metadata.json downloads/metadata-uploaded.json downloads/upload-progress.json
+
+            # 重新下载所有软件包（已存在的会被跳过）
+            echo ""
+            echo "🔄 开始重新下载..."
+            bun run download:all
+
+            echo ""
+            echo "📊 重新下载统计："
+            if [ -f downloads/metadata.json ]; then
+              total=$(jq '. | length' downloads/metadata.json)
+              echo "  总计: $total 个软件包"
+            fi
+          else
+            echo "✓ downloads 目录包含 $qpkg_count 个文件，无需重新下载"
+          fi
 
       - name: 上传到 CTFile
         if: ${{ !inputs.download_only }}
