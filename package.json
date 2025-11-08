@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "fetch": "bun run src/fetch-xml.ts",
+    "check-existing": "bun run src/check-existing-files.ts",
     "download": "bun run src/download.ts",
     "download:all": "bun run src/download.ts",
     "download:update": "bun run src/download-updates.ts",

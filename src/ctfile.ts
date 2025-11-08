@@ -84,15 +84,21 @@ export class CTFileClient {
       body: JSON.stringify(data),
     });
 
-    if (!response.ok) {
-      throw new Error(`CTFile API error: ${response.status} ${response.statusText}`);
+    // Always try to read response body, even for non-2xx status codes
+    let result: any;
+    try {
+      result = await response.json();
+    } catch (parseError) {
+      // If we can't parse JSON, throw the HTTP error
+      if (!response.ok) {
+        throw new Error(`CTFile API error: ${response.status} ${response.statusText}`);
+      }
+      throw parseError;
     }
 
-    const result = await response.json() as any;
-
-    // Debug: log the response for folder creation
-    if (endpoint.includes('folder/create')) {
-      console.log(`  ℹ API Response:`, JSON.stringify(result));
+    // Debug: log the response for folder operations
+    if (endpoint.includes('folder/create') || endpoint.includes('folder/list')) {
+      console.log(`  ℹ API Response (${endpoint}):`, JSON.stringify(result).substring(0, 500));
     }
 
     // Special handling for folder creation when folder exists
@@ -113,8 +119,11 @@ export class CTFileClient {
       };
     }
 
+    // Check for API errors in the response body
     if (result.code !== 200 && result.code !== '200') {
-      throw new Error(`CTFile API error: ${result.message || 'Unknown error'}`);
+      // Include HTTP status for better debugging
+      const httpStatus = response.ok ? '' : ` (HTTP ${response.status})`;
+      throw new Error(`CTFile API error${httpStatus}: ${result.message || 'Unknown error'}`);
     }
 
     return result;
@@ -228,16 +237,27 @@ export class CTFileClient {
 
     // Normalize the response: CTFile API uses 'results' field
     if (result.results && !result.data) {
-      result.data = result.results.map((item: any) => ({
-        id: item.key?.replace('d', ''), // Remove 'd' prefix
-        folder_id: item.key?.replace('d', ''),
+      // Filter to only include folders (icon === "folder"), not files
+      const foldersOnly = result.results.filter((item: any) => item.icon === 'folder');
+
+      result.data = foldersOnly.map((item: any) => ({
+        id: item.key?.replace(/^d/, ''), // Remove 'd' prefix with regex
+        folder_id: item.key?.replace(/^d/, ''),
         name: item.name,
         folder_name: item.name,
         date: item.date,
       }));
     }
 
-    console.log(`  ✓ Found ${result.data?.length || 0} folder(s)`);
+    const folderCount = result.data?.length || 0;
+    console.log(`  ✓ Found ${folderCount} folder(s)`);
+
+    // Debug: log folder names for troubleshooting (max 20)
+    if (folderCount > 0 && folderCount <= 20) {
+      result.data.forEach((f: any) => {
+        console.log(`     - "${f.name || f.folder_name}" (ID: ${f.id || f.folder_id})`);
+      });
+    }
 
     return result;
   }

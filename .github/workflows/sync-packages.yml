@@ -176,6 +176,42 @@ jobs:
             echo "📊 软件包总数: $total_count"
           fi
 
+      - name: 检查 CTFile 中已存在的文件
+        if: ${{ !inputs.upload_only && steps.check_updates.outputs.has_updates == 'true' && !inputs.force_download }}
+        id: check_existing
+        run: |
+          echo "🔍 检查 CTFile 中已存在的文件，避免重复下载..."
+          echo ""
+
+          # 运行检查脚本
+          bun run check-existing
+
+          # 统计清理后的数量
+          if [ -f config/update-apps.json ]; then
+            remaining_count=$(jq '.plugins.item | length' config/update-apps.json)
+            removed_count=$((${{ steps.check_updates.outputs.update_count }} - remaining_count))
+
+            echo ""
+            echo "📊 检查结果："
+            echo "  原计划下载: ${{ steps.check_updates.outputs.update_count }} 个"
+            echo "  已存在跳过: $removed_count 个"
+            echo "  实际需要下载: $remaining_count 个"
+            echo ""
+
+            echo "remaining_count=$remaining_count" >> $GITHUB_OUTPUT
+            echo "removed_count=$removed_count" >> $GITHUB_OUTPUT
+
+            # 如果所有文件都已存在，标记为无需下载
+            if [ "$remaining_count" -eq 0 ]; then
+              echo "✓ 所有软件包都已存在于 CTFile，无需下载"
+              echo "needs_download=false" >> $GITHUB_OUTPUT
+            else
+              echo "needs_download=true" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "needs_download=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: 增量下载更新的软件包
         if: ${{ !inputs.upload_only && (steps.check_updates.outputs.has_updates == 'true' || inputs.force_download) }}
         run: |
