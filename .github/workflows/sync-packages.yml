@@ -83,7 +83,7 @@ jobs:
         run: |
           cat > .env << EOF
           # QNAP 下载源配置
-          QNAP_DOWNLOAD_URL=https://update.qnap.com/FirmwareRelease.xml
+          QNAP_DOWNLOAD_URL=
           QNAP_USERNAME=
           QNAP_PASSWORD=
 
@@ -281,28 +281,23 @@ jobs:
               update_type="元数据更新"
             fi
 
-            # 创建提交消息文件
-            cat > /tmp/commit_msg.txt << 'COMMIT_EOF'
-自动更新: ${update_type}
+            # 创建提交消息
+            commit_msg="自动更新: ${update_type}
 
-🤖 由 GitHub Actions 自动生成
-📅 更新时间: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-🔗 工作流: ${{ github.workflow }}
-🔢 运行 ID: ${{ github.run_id }}
-COMMIT_EOF
-
-            # 替换变量
-            sed -i "s/\${update_type}/${update_type}/g" /tmp/commit_msg.txt
-            sed -i "s/\$(date -u '+%Y-%m-%d %H:%M:%S UTC')/$(date -u '+%Y-%m-%d %H:%M:%S UTC')/g" /tmp/commit_msg.txt
+            🤖 由 GitHub Actions 自动生成
+            📅 更新时间: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+            🔗 工作流: ${{ github.workflow }}
+            🔢 运行 ID: ${{ github.run_id }}"
 
             # 添加软件包数量（如果有）
             if [ -f config/apps.json ]; then
               pkg_count=$(jq '.plugins.item | length' config/apps.json)
-              echo "📦 软件包总数: ${pkg_count}" >> /tmp/commit_msg.txt
-              echo "ℹ  配置文件已保存到 GitHub Actions Artifacts" >> /tmp/commit_msg.txt
+              commit_msg="${commit_msg}
+            📦 软件包总数: ${pkg_count}
+            ℹ  配置文件已保存到 GitHub Actions Artifacts"
             fi
 
-            git commit -F /tmp/commit_msg.txt
+            git commit -m "$commit_msg"
 
             git push
             echo "✓ 已提交并推送更新"
