@@ -81,6 +81,7 @@ function parseQpkgFilename(filename: string): { version?: string; arch?: string 
 
 /**
  * Check if a file exists in CTFile with the same version
+ * Folder structure: CTFILE_FOLDER_ID (qnaporg-github) / ProductName / YYYY-MM / files
  */
 async function checkFileExistsInCTFile(
   ctfileClient: CTFileClient,
@@ -93,7 +94,8 @@ async function checkFileExistsInCTFile(
     const productFolderName = getProductFolderName(productName);
     const yearMonth = getCurrentYearMonth();
 
-    // Get product folder
+    // Step 1: Find product folder under qnaporg-github (rootFolderId)
+    // CTFILE_FOLDER_ID is already the qnaporg-github folder
     const productListResult = await ctfileClient.listFolders(rootFolderId, true);
     const productFolders = productListResult.data || [];
     const productFolder = productFolders.find((f: any) =>
@@ -106,8 +108,9 @@ async function checkFileExistsInCTFile(
     }
 
     const productFolderId = productFolder.id || productFolder.folder_id;
+    console.log(`  ℹ️  找到产品文件夹: ${productFolderName} (ID: ${productFolderId})`);
 
-    // Get monthly folder
+    // Step 2: Find monthly folder under product folder
     const monthlyListResult = await ctfileClient.listFolders(productFolderId, true);
     const monthlyFolders = monthlyListResult.data || [];
     const monthlyFolder = monthlyFolders.find((f: any) =>
@@ -120,6 +123,7 @@ async function checkFileExistsInCTFile(
     }
 
     const monthlyFolderId = monthlyFolder.id || monthlyFolder.folder_id;
+    console.log(`  ℹ️  找到月份文件夹: ${yearMonth} (ID: ${monthlyFolderId})`);
 
     // List files in monthly folder
     const normalizedFolderId = monthlyFolderId.startsWith('d') ? monthlyFolderId : `d${monthlyFolderId}`;
@@ -188,17 +192,21 @@ async function main() {
   console.log(`\n🔑 CTFile 配置:`);
   console.log(`  Root folder ID: ${rootFolderId}`);
 
-  // Check for update-apps.json
-  const configDir = join(process.cwd(), 'config');
-  const updateFilePath = join(configDir, 'update-apps.json');
+  // Get config file path from command line or use default
+  const args = process.argv.slice(2);
+  const configFile = args[0] || 'config/update-apps.json';
+
+  const updateFilePath = configFile.startsWith('/')
+    ? configFile
+    : join(process.cwd(), configFile);
 
   if (!existsSync(updateFilePath)) {
-    console.log('\n⚠️  未找到 config/update-apps.json');
+    console.log(`\n⚠️  未找到 ${configFile}`);
     console.log('   跳过检查，将下载所有文件');
     return;
   }
 
-  console.log(`\n📋 使用文件: config/update-apps.json`);
+  console.log(`\n📋 使用文件: ${configFile}`);
 
   // Load JSON
   const file = Bun.file(updateFilePath);
@@ -266,7 +274,7 @@ async function main() {
     };
 
     await Bun.write(updateFilePath, JSON.stringify(updatedData, null, 2));
-    console.log(`\n✓ 已更新: config/update-apps.json`);
+    console.log(`\n✓ 已更新: ${configFile}`);
     console.log(`  删除了 ${itemsToRemove.length} 个已存在的软件包`);
   } else {
     console.log('\n✓ 所有软件包都需要下载，无需修改文件');

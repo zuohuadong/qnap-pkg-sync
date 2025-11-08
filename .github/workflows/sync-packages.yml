@@ -276,6 +276,11 @@ jobs:
             # 清空 metadata.json 以强制重新下载
             rm -f downloads/metadata.json downloads/metadata-uploaded.json downloads/upload-progress.json
 
+            # 检查 CTFile 中已存在的文件（对 apps.json 进行过滤）
+            echo ""
+            echo "🔍 检查 CTFile 中是否已存在这些文件..."
+            bun run src/check-existing-files.ts config/apps.json
+
             # 重新下载所有软件包（已存在的会被跳过）
             echo ""
             echo "🔄 开始重新下载..."
