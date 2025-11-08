@@ -83,9 +83,9 @@ jobs:
         run: |
           cat > .env << EOF
           # QNAP 下载源配置
-          QNAP_DOWNLOAD_URL=
-          QNAP_USERNAME=
-          QNAP_PASSWORD=
+          QNAP_DOWNLOAD_URL=${{ secrets.QNAP_DOWNLOAD_URL }}
+          QNAP_USERNAME=${{ secrets.QNAP_USERNAME }}
+          QNAP_PASSWORD=${{ secrets.QNAP_PASSWORD }}
 
           # CTFile 配置
           CTFILE_SESSION=${{ secrets.CTFILE_SESSION }}
