@@ -8,3 +8,6 @@ downloads/
 
 # 不提交任何配置文件（使用 GitHub Actions Artifacts 管理）
 config/
+
+# 加密脚本和加密文件
+scripts/encrypt-config.sh

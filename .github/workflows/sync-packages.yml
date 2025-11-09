@@ -5,24 +5,15 @@ on:
   schedule:
     - cron: '0 23 * * *'
 
-  # 支持手动触发
+  # 手动触发
   workflow_dispatch:
     inputs:
-      force_download:
-        description: '强制下载所有软件（忽略变化检测）'
+      decrypt_config:
+        description: '解密 config.tar.gz.enc 到 config 目录'
         required: false
         type: boolean
         default: false
-      download_only:
-        description: '仅下载，不上传'
-        required: false
-        type: boolean
-        default: false
-      upload_only:
-        description: '仅上传已下载的文件'
-        required: false
-        type: boolean
-        default: false
+
 
 # 取消正在运行的旧工作流
 concurrency:
@@ -48,6 +39,29 @@ jobs:
 
       - name: 安装依赖
         run: bun install --frozen-lockfile
+
+      - name: 解密配置文件
+        if: ${{ inputs.decrypt_config }}
+        env:
+          ENCRYPTION_PASSWORD: ${{ secrets.ENCRYPTION_PASSWORD }}
+        run: |
+          echo "🔓 解密配置文件..."
+
+          if [ ! -f "config.tar.gz.enc" ]; then
+            echo "❌ Error: config.tar.gz.enc not found"
+            exit 1
+          fi
+
+          openssl enc -aes-256-cbc -d -pbkdf2 \
+            -in config.tar.gz.enc \
+            -out config.tar.gz \
+            -pass env:ENCRYPTION_PASSWORD
+
+          tar -xzf config.tar.gz
+          rm config.tar.gz
+
+          echo "✅ Config files restored:"
+          ls -lh config/
 
       - name: 启用 BBR 加速
         run: |
