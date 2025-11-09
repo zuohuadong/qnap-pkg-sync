@@ -228,12 +228,7 @@ async function main() {
       const stats = Bun.file(updatePath).size;
       console.log(`✓ Saved ${(stats / 1024).toFixed(1)} KB to ${updatePath}`);
     } else {
-      // Remove update-apps.json if no updates
-      const updateFile = Bun.file(updatePath);
-      if (await updateFile.exists()) {
-        console.log(`🗑️  No updates found, removing ${updatePath}`);
-        await Bun.$`rm -f ${updatePath}`.quiet();
-      }
+      console.log(`ℹ️  No updates found, keeping existing ${updatePath} if present`);
     }
 
     console.log();
