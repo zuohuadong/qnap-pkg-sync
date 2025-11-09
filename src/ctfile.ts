@@ -518,14 +518,30 @@ export class CTFileClient {
           }
 
           console.log(`  📦 Parsing response JSON...`);
-          const result = await response.json() as any;
+
+          // Get response text first to handle parsing errors
+          const responseText = await response.text();
+          let result: any;
+
+          try {
+            result = JSON.parse(responseText);
+          } catch (parseError) {
+            console.error(`  ❌ Failed to parse JSON response`);
+            console.error(`  📄 Response preview (first 500 chars):`);
+            console.error(`     ${responseText.substring(0, 500)}`);
+            throw new Error(`Failed to parse JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
+          }
 
           // Stop progress display
           stopProgress();
 
+          // Log the parsed result for debugging
+          console.log(`  📋 Upload response:`, JSON.stringify(result).substring(0, 200));
+
           const fileId = result.id?.toString() || result.file_id?.toString() || '';
 
           if (!fileId) {
+            console.error(`  ⚠️  Response missing file ID. Full response:`, JSON.stringify(result, null, 2));
             throw new Error('No file ID returned from upload');
           }
 

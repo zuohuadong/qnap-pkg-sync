@@ -151,7 +151,7 @@ jobs:
           WEBDAV_ROOT_PATH=/qnaporg-github
 
           # 上传配置
-          UPLOAD_CONCURRENCY=2
+          UPLOAD_CONCURRENCY=1
           MAX_UPLOAD_FILE_SIZE=1073741824
           EOF
 
