@@ -19,6 +19,10 @@ import { join } from 'path';
 import { CTFileClient } from './ctfile';
 import { getEnv, loadEnv, getEnvOrDefault } from './env';
 import { WebDAVClient } from './webdav-client';
+import { formatBytes } from './utils/format';
+import { promiseWithConcurrencySafe } from './utils/concurrency';
+import { getCurrentYearMonth } from './ctfile-utils';
+import type { PackageMetadata, UploadedPackage } from './types';
 
 /**
  * Default concurrent upload limit
@@ -30,7 +34,7 @@ const DEFAULT_CONCURRENCY = 2;
 /**
  * Upload progress tracking file
  */
-const UPLOAD_PROGRESS_FILE = 'downloads/upload-progress.json';
+const UPLOAD_PROGRESS_FILE = 'config/upload-progress.json';
 
 interface UploadProgress {
   [filename: string]: {
@@ -40,17 +44,6 @@ interface UploadProgress {
     ctfileFolderUrl?: string;
     uploadDate: string;
   };
-}
-
-/**
- * Get current year-month string for folder name
- * Format: YYYY-MM (e.g., 2025-11)
- */
-function getCurrentYearMonth(): string {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  return `${year}-${month}`;
 }
 
 /**
@@ -79,93 +72,6 @@ async function saveUploadProgress(progressFilePath: string, progress: UploadProg
   } catch (error) {
     console.warn(`  ⚠ Failed to save upload progress: ${error instanceof Error ? error.message : error}`);
   }
-}
-
-/**
- * Execute promises with concurrency limit
- * Each task is wrapped with error handling to ensure failures don't affect other tasks
- * @param tasks Array of task functions that return promises
- * @param concurrency Maximum number of concurrent tasks
- * @returns Array of results in the same order as tasks
- */
-async function promiseWithConcurrency<T>(
-  tasks: (() => Promise<T>)[],
-  concurrency: number
-): Promise<T[]> {
-  const results: T[] = [];
-  const executing: Promise<void>[] = [];
-
-  for (const [index, task] of tasks.entries()) {
-    // Create a promise that executes the task and stores the result
-    // Wrap with error handling to ensure one failure doesn't kill all tasks
-    const promise = (async () => {
-      try {
-        const result = await task();
-        results[index] = result;
-      } catch (error) {
-        // Log error but don't throw - let individual tasks handle their errors
-        console.error(`  ⚠ Task ${index + 1} encountered an error: ${error instanceof Error ? error.message : error}`);
-        // Store undefined result for failed tasks
-        results[index] = undefined as any;
-      }
-    })();
-
-    // Add to executing pool
-    const wrappedPromise = promise.then(() => {
-      // Remove from executing pool when done
-      executing.splice(executing.indexOf(wrappedPromise), 1);
-    }).catch((error) => {
-      // Extra safety: catch any unhandled errors
-      console.error(`  ⚠ Unhandled error in task wrapper: ${error instanceof Error ? error.message : error}`);
-      executing.splice(executing.indexOf(wrappedPromise), 1);
-    });
-
-    executing.push(wrappedPromise);
-
-    // Wait if we've reached concurrency limit
-    if (executing.length >= concurrency) {
-      await Promise.race(executing);
-    }
-  }
-
-  // Wait for all remaining tasks to complete
-  await Promise.all(executing);
-
-  return results;
-}
-
-/**
- * Format bytes to human-readable string
- */
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
-}
-
-interface PackageMetadata {
-  productName: string;
-  version: string;
-  architecture: string;
-  filename: string;
-  fileSize: number;
-  downloadUrl: string;
-  publishedDate: string;
-  downloadDate: string;
-  signature: string;
-}
-
-interface UploadedPackage extends PackageMetadata {
-  localPath: string;
-  ctfileUrl?: string;
-  ctfileShortUrl?: string;
-  ctfileFolderUrl?: string;
-  uploadDate?: string;
-  uploadError?: string;
-  uploadMethod?: 'ctfile' | 'webdav'; // Track which method was used
-  webdavUrl?: string; // WebDAV download URL if applicable
 }
 
 /**
@@ -487,7 +393,7 @@ async function uploadPackages(
       });
 
       // Execute uploads with concurrency limit
-      await promiseWithConcurrency(uploadTasks, concurrency);
+      await promiseWithConcurrencySafe(uploadTasks, concurrency);
 
       // Update total processed after all tasks complete
       totalProcessed += productPackages.length;
@@ -532,98 +438,6 @@ function groupPackagesByProduct(packages: UploadedPackage[]): Map<string, Upload
 }
 
 /**
- * Generate README content
- */
-function generateReadme(packages: UploadedPackage[]): string {
-  const successfulUploads = packages.filter(p => p.ctfileUrl);
-  const groupedPackages = groupPackagesByProduct(successfulUploads);
-
-  let readme = '# QNAP Software Packages - Download Links\n\n';
-  readme += `Generated on: ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}\n\n`;
-  readme += `Total Products: ${groupedPackages.size}\n`;
-  readme += `Total Files: ${successfulUploads.length}\n\n`;
-  readme += '---\n\n';
-
-  // Table of Contents
-  readme += '## Table of Contents\n\n';
-  const sortedProducts = Array.from(groupedPackages.keys()).sort();
-  for (const productName of sortedProducts) {
-    const anchor = productName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    readme += `- [${productName}](#${anchor})\n`;
-  }
-  readme += '\n---\n\n';
-
-  // Product sections
-  for (const productName of sortedProducts) {
-    const productPackages = groupedPackages.get(productName)!;
-
-    readme += `## ${productName}\n\n`;
-
-    // Get latest version and update time
-    const latestPackage = productPackages.sort((a, b) => {
-      const dateA = new Date(a.uploadDate || a.downloadDate).getTime();
-      const dateB = new Date(b.uploadDate || b.downloadDate).getTime();
-      return dateB - dateA;
-    })[0];
-
-    readme += `**Version:** ${latestPackage.version}  \n`;
-
-    const updateDate = new Date(latestPackage.publishedDate);
-    readme += `**Update Time:** ${updateDate.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}  \n`;
-
-    // Add folder download link
-    if (latestPackage.ctfileFolderUrl) {
-      readme += `**📁 Folder Download:** [Browse all files](${latestPackage.ctfileFolderUrl})  \n`;
-    }
-
-    readme += '\n### Available Architectures\n\n';
-    readme += '| Architecture | Filename | Update Time | File Size | Download Link |\n';
-    readme += '|--------------|----------|-------------|-----------|---------------|\n';
-
-    // Sort by architecture
-    const sortedPackages = productPackages.sort((a, b) =>
-      a.architecture.localeCompare(b.architecture)
-    );
-
-    for (const pkg of sortedPackages) {
-      const size = formatBytes(pkg.fileSize);
-      const downloadUrl = pkg.ctfileShortUrl || pkg.ctfileUrl || 'N/A';
-      const linkText = pkg.ctfileShortUrl ? '🔗 Download' : '🔗 Download (Full URL)';
-      const updateTime = new Date(pkg.publishedDate).toLocaleString('zh-CN', {
-        timeZone: 'Asia/Shanghai',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit'
-      });
-
-      readme += `| ${pkg.architecture} | \`${pkg.filename}\` | ${updateTime} | ${size} | [${linkText}](${downloadUrl}) |\n`;
-    }
-
-    readme += '\n---\n\n';
-  }
-
-  // Footer
-  readme += '## Notes\n\n';
-  readme += '- All files are hosted on CTFile (城通网盘)\n';
-  readme += '- Download links are valid as per CTFile retention policy\n';
-  readme += '- Files are uploaded from official QNAP qnap.xxx repository\n';
-  readme += '- 📁 Use "Folder Download" link to browse and download all files for a product\n';
-  readme += '\n---\n\n';
-  readme += '*Generated by QNAP Package Sync Tool*\n';
-
-  return readme;
-}
-
-/**
- * Save README file
- */
-async function saveReadme(content: string, outputPath: string): Promise<void> {
-  await Bun.write(outputPath, content);
-  console.log(`\n✓ README generated: ${outputPath}`);
-  console.log(`  Size: ${(content.length / 1024).toFixed(2)} KB`);
-}
-
-/**
  * Main upload and share function
  */
 async function main() {
@@ -651,13 +465,11 @@ async function main() {
   // Load environment variables
   await loadEnv();
 
-  const metadataPath = join(process.cwd(), 'downloads', 'metadata.json');
+  const metadataPath = join(process.cwd(), 'config', 'metadata.json');
   const packagesDir = join(process.cwd(), 'downloads');
-  const outputReadme = join(process.cwd(), 'downloads', 'PACKAGES.md');
 
   console.log(`  Metadata: ${metadataPath}`);
   console.log(`  Packages: ${packagesDir}`);
-  console.log(`  Output: ${outputReadme}`);
 
   // Load metadata
   console.log('\n📋 Loading metadata...');
@@ -733,11 +545,6 @@ async function main() {
   // Upload files (will create product/monthly folder structure automatically)
   packages = await uploadPackages(packages, ctfileClient, rootFolderId, webdavClient, concurrency);
 
-  // Generate README
-  console.log('\n📝 Generating README...');
-  const readme = generateReadme(packages);
-  await saveReadme(readme, outputReadme);
-
   // Save updated metadata with CTFile links
   const updatedMetadataPath = metadataPath.replace('.json', '-uploaded.json');
   await Bun.write(updatedMetadataPath, JSON.stringify(packages, null, 2));
@@ -747,7 +554,6 @@ async function main() {
   console.log('\n' + '='.repeat(60));
   console.log('✓ Upload and share completed!');
   console.log('='.repeat(60));
-  console.log(`  README: ${outputReadme}`);
   console.log(`  Metadata: ${updatedMetadataPath}`);
 
   const failed = packages.filter(p => !p.ctfileUrl).length;

@@ -125,7 +125,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: metadata
-          path: downloads/
+          path: config/
 
       - name: 检查 apps.json 是否恢复成功
         if: ${{ !inputs.upload_only }}
@@ -225,10 +225,10 @@ jobs:
 
           echo ""
           echo "📊 下载统计："
-          if [ -f downloads/metadata.json ]; then
+          if [ -f config/metadata.json ]; then
             echo "  元数据文件: ✓"
-            jq -r '.[] | "  - \(.productName) \(.version) [\(.architecture)]"' downloads/metadata.json | head -20
-            total=$(jq '. | length' downloads/metadata.json)
+            jq -r '.[] | "  - \(.productName) \(.version) [\(.architecture)]"' config/metadata.json | head -20
+            total=$(jq '. | length' config/metadata.json)
             echo "  总计: $total 个软件包"
           else
             echo "  ⚠ 未找到元数据文件"
@@ -252,7 +252,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: metadata
-          path: downloads/
+          path: config/
 
       - name: 检查并重新下载未上传的文件
         if: ${{ !inputs.download_only && !inputs.upload_only && steps.check_updates.outputs.has_updates == 'false' }}
@@ -260,7 +260,7 @@ jobs:
           echo "🔍 检查是否有下载但未成功上传的文件..."
 
           # 如果没有 metadata.json，说明没有之前的下载记录
-          if [ ! -f downloads/metadata.json ]; then
+          if [ ! -f config/metadata.json ]; then
             echo "ℹ 未找到之前的 metadata.json，无需重新下载"
             exit 0
           fi
@@ -270,11 +270,11 @@ jobs:
 
           if [ "$qpkg_count" -eq 0 ]; then
             echo "⚠ 发现 metadata.json 但 downloads 目录为空，需要重新下载"
-            metadata_count=$(jq '. | length' downloads/metadata.json)
+            metadata_count=$(jq '. | length' config/metadata.json)
             echo "  将重新下载 $metadata_count 个文件"
 
-            # 清空 metadata.json 以强制重新下载
-            rm -f downloads/metadata.json downloads/metadata-uploaded.json downloads/upload-progress.json
+            # 清空 metadata 文件以强制重新下载
+            rm -f config/metadata.json config/metadata-uploaded.json config/upload-progress.json
 
             # 检查 CTFile 中已存在的文件（对 apps.json 进行过滤）
             echo ""
@@ -288,8 +288,8 @@ jobs:
 
             echo ""
             echo "📊 重新下载统计："
-            if [ -f downloads/metadata.json ]; then
-              total=$(jq '. | length' downloads/metadata.json)
+            if [ -f config/metadata.json ]; then
+              total=$(jq '. | length' config/metadata.json)
               echo "  总计: $total 个软件包"
             fi
           else
@@ -312,18 +312,13 @@ jobs:
 
           echo ""
           echo "📊 上传结果："
-          if [ -f downloads/metadata-uploaded.json ]; then
+          if [ -f config/metadata-uploaded.json ]; then
             echo "  上传元数据: ✓"
 
             # 统计上传成功的文件
-            success=$(jq '[.[] | select(.ctfileUrl != null)] | length' downloads/metadata-uploaded.json)
-            total=$(jq '. | length' downloads/metadata-uploaded.json)
+            success=$(jq '[.[] | select(.ctfileUrl != null)] | length' config/metadata-uploaded.json)
+            total=$(jq '. | length' config/metadata-uploaded.json)
             echo "  成功: $success/$total"
-          fi
-
-          if [ -f downloads/PACKAGES.md ]; then
-            echo "  README 文件: ✓"
-            wc -l downloads/PACKAGES.md | awk '{print "    " $1 " 行"}'
           fi
 
       - name: 上传下载进度为 Artifact
@@ -331,7 +326,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: upload-progress
-          path: downloads/upload-progress.json
+          path: config/upload-progress.json
           retention-days: 30
           if-no-files-found: ignore
 
@@ -341,9 +336,8 @@ jobs:
         with:
           name: metadata
           path: |
-            downloads/metadata.json
-            downloads/metadata-uploaded.json
-            downloads/PACKAGES.md
+            config/metadata.json
+            config/metadata-uploaded.json
           retention-days: 90
           if-no-files-found: ignore
 
@@ -362,17 +356,10 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
 
-          # 只添加 downloads 目录的元数据和 README
-          # 不提交 config/ 目录（使用 Artifacts 管理）
-          git add downloads/metadata.json \
-                  downloads/metadata-uploaded.json \
-                  downloads/PACKAGES.md \
-                  downloads/upload-progress.json \
-                  2>/dev/null || true
-
-          # 检查是否有变化
-          if git diff --staged --quiet; then
-            echo "没有文件需要提交"
+          # 检查是否有变化（现在 metadata 文件在 config/ 目录，通过 Artifacts 管理）
+          # 这里主要是为了兼容性，实际上可能不会有文件需要提交
+          if git diff --cached --quiet && git diff --quiet; then
+            echo "没有文件需要提交（元数据文件现在通过 GitHub Actions Artifacts 管理）"
           else
             # 统计更新信息
             if [ "${{ steps.check_updates.outputs.has_updates }}" = "true" ]; then
@@ -411,20 +398,20 @@ jobs:
           echo "## 📦 QNAP 软件包同步摘要" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          if [ -f downloads/metadata.json ]; then
-            total=$(jq '. | length' downloads/metadata.json)
+          if [ -f config/metadata.json ]; then
+            total=$(jq '. | length' config/metadata.json)
             echo "### 下载统计" >> $GITHUB_STEP_SUMMARY
             echo "- 总文件数: $total" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
 
             echo "### 产品列表" >> $GITHUB_STEP_SUMMARY
-            jq -r '.[] | "- **\(.productName)** \(.version) (\(.architecture))"' downloads/metadata.json | sort -u >> $GITHUB_STEP_SUMMARY
+            jq -r '.[] | "- **\(.productName)** \(.version) (\(.architecture))"' config/metadata.json | sort -u >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
           fi
 
-          if [ -f downloads/metadata-uploaded.json ]; then
-            success=$(jq '[.[] | select(.ctfileUrl != null)] | length' downloads/metadata-uploaded.json)
-            failed=$(jq '[.[] | select(.ctfileUrl == null)] | length' downloads/metadata-uploaded.json)
+          if [ -f config/metadata-uploaded.json ]; then
+            success=$(jq '[.[] | select(.ctfileUrl != null)] | length' config/metadata-uploaded.json)
+            failed=$(jq '[.[] | select(.ctfileUrl == null)] | length' config/metadata-uploaded.json)
 
             echo "### 上传统计" >> $GITHUB_STEP_SUMMARY
             echo "- ✅ 成功: $success" >> $GITHUB_STEP_SUMMARY
@@ -433,7 +420,7 @@ jobs:
 
             if [ $failed -gt 0 ]; then
               echo "### 失败的文件" >> $GITHUB_STEP_SUMMARY
-              jq -r '.[] | select(.ctfileUrl == null) | "- \(.filename): \(.uploadError // "未知错误")"' downloads/metadata-uploaded.json >> $GITHUB_STEP_SUMMARY
+              jq -r '.[] | select(.ctfileUrl == null) | "- \(.filename): \(.uploadError // "未知错误")"' config/metadata-uploaded.json >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
             fi
           fi

@@ -9,155 +9,18 @@
  * - Concurrent downloads (default: 5)
  */
 
-import { join, basename } from 'path';
+import { join } from 'path';
 import { createHash } from 'crypto';
+import { formatBytes, formatTime } from './utils/format';
+import { promiseWithConcurrency } from './utils/concurrency';
+import { ensureDir, getFilenameFromUrl } from './utils/file';
+import type { Platform, AppItem, AppsConfig, PackageMetadata, DownloadOptions, DownloadResult } from './types';
 
 /**
  * Default concurrent download limit
  * Can be overridden with DOWNLOAD_CONCURRENCY environment variable
  */
 const DEFAULT_DOWNLOAD_CONCURRENCY = 5;
-
-interface Platform {
-  platformID: string;
-  location: string;
-  signature: string;
-}
-
-interface AppItem {
-  name: string;
-  version: string;
-  platform: Platform[];
-  internalName: string;
-}
-
-interface AppsConfig {
-  plugins: {
-    cachechk: string;
-    item: AppItem[];
-  };
-}
-
-interface DownloadOptions {
-  url: string;
-  outputPath: string;
-  signature: string;
-  headers?: Record<string, string>;
-  maxRetries?: number;
-  showProgress?: boolean;
-}
-
-interface DownloadResult {
-  success: boolean;
-  filePath: string;
-  fileSize: number;
-  verified: boolean;
-  error?: string;
-}
-
-interface PackageMetadata {
-  productName: string;
-  version: string;
-  architecture: string;
-  filename: string;
-  fileSize: number;
-  downloadUrl: string;
-  publishedDate: string;
-  downloadDate: string;
-  signature: string;
-}
-
-/**
- * Format bytes to human-readable string
- */
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
-}
-
-/**
- * Format seconds to human-readable time string
- */
-function formatTime(seconds: number): string {
-  if (seconds === Infinity || isNaN(seconds)) return 'calculating...';
-  if (seconds < 60) return `${Math.round(seconds)}s`;
-  if (seconds < 3600) {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.round(seconds % 60);
-    return `${mins}m ${secs}s`;
-  }
-  const hours = Math.floor(seconds / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
-  return `${hours}h ${mins}m`;
-}
-
-/**
- * Extract filename from URL
- */
-function getFilenameFromUrl(url: string): string {
-  const urlObj = new URL(url);
-  const pathname = urlObj.pathname;
-  return basename(pathname);
-}
-
-/**
- * Ensure directory exists (create if it doesn't)
- */
-async function ensureDir(dirPath: string): Promise<void> {
-  try {
-    // Try to write a temporary file to test if directory exists
-    // If it doesn't exist, this will fail
-    const testFile = join(dirPath, '.bun-test');
-    await Bun.write(testFile, '');
-    // Clean up test file
-    await Bun.$`rm -f ${testFile}`.quiet();
-  } catch {
-    // Directory doesn't exist, create it
-    await Bun.$`mkdir -p ${dirPath}`.quiet();
-  }
-}
-
-/**
- * Execute promises with concurrency limit
- * Similar to Promise.all but with a maximum concurrency limit
- * @param tasks Array of promise-returning functions
- * @param concurrency Maximum number of concurrent tasks
- */
-async function promiseWithConcurrency<T>(
-  tasks: (() => Promise<T>)[],
-  concurrency: number
-): Promise<T[]> {
-  const results: T[] = [];
-  const executing: Promise<void>[] = [];
-
-  for (let i = 0; i < tasks.length; i++) {
-    const task = tasks[i];
-
-    const promise = (async () => {
-      const result = await task();
-      results[i] = result;
-    })();
-
-    executing.push(promise);
-
-    // Wait if we've reached concurrency limit
-    if (executing.length >= concurrency) {
-      await Promise.race(executing);
-      // Remove completed promises
-      executing.splice(
-        executing.findIndex(p => p === promise),
-        1
-      );
-    }
-  }
-
-  // Wait for all remaining promises to complete
-  await Promise.all(executing);
-  return results;
-}
 
 /**
  * Verify file signature (MD5 hash comparison)
@@ -473,7 +336,7 @@ export async function downloadAllApps(
   await promiseWithConcurrency(taskFunctions, concurrency);
 
   // Save metadata to JSON
-  const metadataPath = join(outputDir, 'metadata.json');
+  const metadataPath = join(process.cwd(), 'config', 'metadata.json');
   await Bun.write(metadataPath, JSON.stringify(packagesMetadata, null, 2));
   console.log(`\n📝 Metadata saved to: ${metadataPath}`);
 
@@ -740,7 +603,7 @@ export async function downloadUpdates(
   }
 
   // Save metadata to JSON
-  const metadataPath = join(outputDir, 'metadata.json');
+  const metadataPath = join(process.cwd(), 'config', 'metadata.json');
 
   // Read existing metadata if it exists
   let existingMetadata: PackageMetadata[] = [];

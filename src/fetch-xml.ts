@@ -7,6 +7,7 @@
 
 import { parseStringPromise } from 'xml2js';
 import { loadEnv, getEnv } from './env';
+import type { Platform, AppItem, AppsConfig } from './types';
 
 interface FetchXmlOptions {
   url: string;
@@ -84,26 +85,6 @@ async function saveJson(data: any, outputPath: string): Promise<void> {
   } catch (error) {
     throw new Error(`Failed to save JSON: ${error instanceof Error ? error.message : error}`);
   }
-}
-
-interface AppItem {
-  name: string;
-  version: string;
-  platform: Platform[];
-  internalName: string;
-}
-
-interface Platform {
-  platformID: string;
-  location: string;
-  signature: string;
-}
-
-interface AppsConfig {
-  plugins: {
-    cachechk: string;
-    item: AppItem[];
-  };
 }
 
 /**

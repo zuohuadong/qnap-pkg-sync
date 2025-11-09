@@ -168,7 +168,7 @@ bun run download "OpenList"
 - `MUSL_CROSS_11.1.5_arm_64.qpkg`
 - `OpenList_4.1.6_x86_64.qpkg`
 
-下载完成后会自动生成 `downloads/metadata.json`，包含所有下载文件的元数据。
+下载完成后会自动生成 `config/metadata.json`，包含所有下载文件的元数据。
 
 ### 步骤 3: 上传到 CTFile 并生成分享链接
 
@@ -177,12 +177,11 @@ bun run upload
 ```
 
 此命令会：
-1. 读取 `downloads/metadata.json` 文件
+1. 读取 `config/metadata.json` 文件
 2. 按软件简称分组（如 Apache83、MUSL_Framework、OpenList）
 3. 为每个软件创建文件夹，并在其下创建当月子文件夹（如 `Apache83/2025-11/`）
 4. 上传所有文件到对应的软件/月份文件夹
-5. 生成 `downloads/PACKAGES.md` 包含所有文件信息和下载链接
-6. 保存 `downloads/metadata-uploaded.json` 包含上传后的完整信息
+5. 保存 `config/metadata-uploaded.json` 包含上传后的完整信息
 
 ### CTFile 文件夹结构
 

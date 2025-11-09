@@ -1,5 +1,6 @@
 import { basename } from 'path';
 import { createHash } from 'crypto';
+import { formatBytes, formatDuration } from './utils/format';
 
 export interface UploadedFile {
   fileName: string;
@@ -396,28 +397,6 @@ export class CTFileClient {
   }
 
   /**
-   * Format bytes to human-readable string
-   */
-  private formatBytes(bytes: number): string {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
-  }
-
-  /**
-   * Format duration to human-readable string
-   */
-  private formatDuration(ms: number): string {
-    const seconds = Math.floor(ms / 1000);
-    if (seconds < 60) return `${seconds}s`;
-    const minutes = Math.floor(seconds / 60);
-    const remainingSeconds = seconds % 60;
-    return `${minutes}m ${remainingSeconds}s`;
-  }
-
-  /**
    * Display upload progress with spinner
    */
   private startProgressDisplay(fileName: string, fileSize: number): () => void {
@@ -433,9 +412,9 @@ export class CTFileClient {
       process.stdout.write('\r\x1b[K'); // Clear line
       process.stdout.write(
         `  ${spinner[frame]} Uploading... ` +
-        `${this.formatBytes(fileSize)} | ` +
-        `Elapsed: ${this.formatDuration(elapsed)} | ` +
-        `Speed: ${this.formatBytes(speed)}/s`
+        `${formatBytes(fileSize)} | ` +
+        `Elapsed: ${formatDuration(elapsed)} | ` +
+        `Speed: ${formatBytes(speed)}/s`
       );
 
       frame = (frame + 1) % spinner.length;
@@ -448,8 +427,8 @@ export class CTFileClient {
       const avgSpeed = (fileSize / elapsed) * 1000;
       process.stdout.write('\r\x1b[K'); // Clear line
       console.log(
-        `  ✓ Upload completed in ${this.formatDuration(elapsed)} ` +
-        `(avg speed: ${this.formatBytes(avgSpeed)}/s)`
+        `  ✓ Upload completed in ${formatDuration(elapsed)} ` +
+        `(avg speed: ${formatBytes(avgSpeed)}/s)`
       );
     };
   }
@@ -460,16 +439,16 @@ export class CTFileClient {
     const fileSize = file.size;
 
     console.log(`\nUploading to CTFile: ${fileName}`);
-    console.log(`  📊 File size: ${this.formatBytes(fileSize)} (${fileSize} bytes)`);
+    console.log(`  📊 File size: ${formatBytes(fileSize)} (${fileSize} bytes)`);
     console.log(`  📁 Folder ID: ${folderId}`);
 
     // Log system resources before upload
     if (typeof process.memoryUsage === 'function') {
       const mem = process.memoryUsage();
       console.log(`  💾 Memory usage before upload:`);
-      console.log(`     RSS: ${this.formatBytes(mem.rss)}`);
-      console.log(`     Heap Used: ${this.formatBytes(mem.heapUsed)} / ${this.formatBytes(mem.heapTotal)}`);
-      console.log(`     External: ${this.formatBytes(mem.external)}`);
+      console.log(`     RSS: ${formatBytes(mem.rss)}`);
+      console.log(`     Heap Used: ${formatBytes(mem.heapUsed)} / ${formatBytes(mem.heapTotal)}`);
+      console.log(`     External: ${formatBytes(mem.external)}`);
     }
 
     // Check minimum file size
@@ -510,7 +489,7 @@ export class CTFileClient {
 
           // Log memory before upload
           const memBefore = process.memoryUsage();
-          console.log(`  💾 Memory before upload: RSS=${this.formatBytes(memBefore.rss)}, Heap=${this.formatBytes(memBefore.heapUsed)}`);
+          console.log(`  💾 Memory before upload: RSS=${formatBytes(memBefore.rss)}, Heap=${formatBytes(memBefore.heapUsed)}`);
 
           const uploadStartTime = Date.now();
 
@@ -530,8 +509,8 @@ export class CTFileClient {
 
           // Log memory after upload
           const memAfter = process.memoryUsage();
-          console.log(`  💾 Memory after upload: RSS=${this.formatBytes(memAfter.rss)}, Heap=${this.formatBytes(memAfter.heapUsed)}`);
-          console.log(`  📈 Memory delta: RSS=${this.formatBytes(memAfter.rss - memBefore.rss)}, Heap=${this.formatBytes(memAfter.heapUsed - memBefore.heapUsed)}`);
+          console.log(`  💾 Memory after upload: RSS=${formatBytes(memAfter.rss)}, Heap=${formatBytes(memAfter.heapUsed)}`);
+          console.log(`  📈 Memory delta: RSS=${formatBytes(memAfter.rss - memBefore.rss)}, Heap=${formatBytes(memAfter.heapUsed - memBefore.heapUsed)}`);
 
           if (!response.ok) {
             const errorText = await response.text().catch(() => 'Unable to read error response');

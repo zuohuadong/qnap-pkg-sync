@@ -1,4 +1,5 @@
 import { basename } from 'path';
+import { formatBytes } from './utils/format';
 
 export interface WebDAVConfig {
   serverUrl: string;
@@ -43,17 +44,6 @@ export class WebDAVClient {
    */
   private async sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  /**
-   * Format bytes to human-readable string
-   */
-  private formatBytes(bytes: number): string {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
   }
 
   /**
@@ -154,7 +144,7 @@ export class WebDAVClient {
       const speed = (fileSize / elapsed) * 1000;
 
       console.log(`  ✓ Upload completed`);
-      console.log(`  ⏱️  Time: ${(elapsed / 1000).toFixed(2)}s (${this.formatBytes(speed)}/s)`);
+      console.log(`  ⏱️  Time: ${(elapsed / 1000).toFixed(2)}s (${formatBytes(speed)}/s)`);
     } catch (error) {
       throw new Error(`curl upload failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -178,7 +168,7 @@ export class WebDAVClient {
       : `${this.config.rootPath}${remotePath.startsWith('/') ? remotePath : '/' + remotePath}`;
 
     console.log(`\n📤 WebDAV Upload: ${fileName}`);
-    console.log(`  Size: ${this.formatBytes(fileSize)}`);
+    console.log(`  Size: ${formatBytes(fileSize)}`);
     console.log(`  Remote path: ${fullRemotePath}`);
 
     // Ensure directory exists (only if folderPath is provided)
@@ -239,7 +229,7 @@ export class WebDAVClient {
             const speed = (fileSize / elapsed) * 1000;
 
             console.log(`  ✓ WebDAV upload succeeded on attempt ${attempt}`);
-            console.log(`  ⏱️  Time: ${(elapsed / 1000).toFixed(2)}s (${this.formatBytes(speed)}/s)`);
+            console.log(`  ⏱️  Time: ${(elapsed / 1000).toFixed(2)}s (${formatBytes(speed)}/s)`);
           } catch (fetchError) {
             clearTimeout(timeoutId);
             throw fetchError;
