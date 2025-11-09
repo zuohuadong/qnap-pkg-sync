@@ -1,0 +1,106 @@
+name: Backup Config Files (Encrypted)
+
+on:
+  workflow_dispatch:  # 手动触发
+  workflow_call:      # 允许其他 workflow 调用
+    inputs:
+      retention-days:
+        description: 'Artifact retention days'
+        type: number
+        default: 90
+
+jobs:
+  backup-encrypted:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create encrypted backup
+        env:
+          ENCRYPTION_PASSWORD: ${{ secrets.BACKUP_ENCRYPTION_PASSWORD }}
+        run: |
+          echo "📦 Creating encrypted backup of config files..."
+
+          # Check if config directory exists
+          if [ ! -d "config" ]; then
+            echo "❌ Config directory not found"
+            exit 1
+          fi
+
+          # Create tar.gz of config folder
+          tar -czf config-backup.tar.gz config/
+
+          # Encrypt using AES-256-CBC
+          if [ -n "$ENCRYPTION_PASSWORD" ]; then
+            echo "🔒 Encrypting backup with AES-256..."
+            openssl enc -aes-256-cbc -salt -pbkdf2 \
+              -in config-backup.tar.gz \
+              -out config-backup.tar.gz.enc \
+              -pass env:ENCRYPTION_PASSWORD
+
+            # Remove unencrypted file
+            rm config-backup.tar.gz
+
+            echo "✅ Encrypted backup created: config-backup.tar.gz.enc"
+            ls -lh config-backup.tar.gz.enc
+          else
+            echo "⚠️  No encryption password set, uploading unencrypted"
+            mv config-backup.tar.gz config-backup.tar.gz.enc
+          fi
+
+      - name: Upload encrypted backup to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-backup-encrypted-${{ github.run_id }}
+          path: config-backup.tar.gz.enc
+          retention-days: ${{ inputs.retention-days || 90 }}
+          compression-level: 0  # Already compressed
+
+      - name: Backup summary
+        run: |
+          echo "## 📦 Backup Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Run ID**: ${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artifact Name**: config-backup-encrypted-${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Retention**: ${{ inputs.retention-days || 90 }} days" >> $GITHUB_STEP_SUMMARY
+          echo "- **Encrypted**: Yes (AES-256-CBC)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📥 To download and decrypt:" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "gh run download ${{ github.run_id }} -n config-backup-encrypted-${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "openssl enc -aes-256-cbc -d -pbkdf2 \\" >> $GITHUB_STEP_SUMMARY
+          echo "  -in config-backup.tar.gz.enc \\" >> $GITHUB_STEP_SUMMARY
+          echo "  -out config-backup.tar.gz \\" >> $GITHUB_STEP_SUMMARY
+          echo "  -pass env:ENCRYPTION_PASSWORD" >> $GITHUB_STEP_SUMMARY
+          echo "tar -xzf config-backup.tar.gz" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  restore-example:
+    runs-on: ubuntu-latest
+    needs: backup-encrypted
+    if: false  # 默认禁用，需要时手动启用
+
+    steps:
+      - name: Download encrypted backup
+        uses: actions/download-artifact@v4
+        with:
+          name: config-backup-encrypted-${{ github.run_id }}
+
+      - name: Decrypt and restore
+        env:
+          ENCRYPTION_PASSWORD: ${{ secrets.BACKUP_ENCRYPTION_PASSWORD }}
+        run: |
+          echo "🔓 Decrypting backup..."
+
+          openssl enc -aes-256-cbc -d -pbkdf2 \
+            -in config-backup.tar.gz.enc \
+            -out config-backup.tar.gz \
+            -pass env:ENCRYPTION_PASSWORD
+
+          echo "📂 Extracting files..."
+          tar -xzf config-backup.tar.gz
+
+          echo "✅ Config files restored:"
+          ls -lh config/

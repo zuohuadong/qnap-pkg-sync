@@ -10,8 +10,7 @@
     "download": "bun run src/download.ts",
     "update": "bun run src/download-updates.ts",
     "upload": "bun run src/upload.ts",
-    "force-sync": "bun run src/force-sync.ts",
-    "upload-artifacts": "bun run src/upload-config-artifacts.ts"
+    "force-sync": "bun run src/force-sync.ts"
   },
   "dependencies": {
     "xml2js": "^0.6.2"
