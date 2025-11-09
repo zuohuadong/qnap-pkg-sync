@@ -86,6 +86,7 @@ async function main() {
   }
 
   // Build index of uploaded files: productName-version-arch -> filename
+  // Support both keys: with version from filename and without version (for empty app.version)
   const uploadedIndex = new Map<string, string>();
 
   for (const [filename, record] of Object.entries(uploadProgress)) {
@@ -93,8 +94,14 @@ async function main() {
     if (parsed.version && parsed.arch) {
       // Extract product name from filename (before version)
       const productName = filename.replace(/_[\d.]+_[^.]+\.qpkg$/, '');
-      const key = `${productName}-${parsed.version}-${parsed.arch}`;
-      uploadedIndex.set(key, filename);
+
+      // Key with version from filename
+      const keyWithVersion = `${productName}-${parsed.version}-${parsed.arch}`;
+      uploadedIndex.set(keyWithVersion, filename);
+
+      // Also add key without version (empty string) to handle apps with empty version field
+      const keyWithoutVersion = `${productName}--${parsed.arch}`;
+      uploadedIndex.set(keyWithoutVersion, filename);
     }
   }
 
@@ -132,15 +139,25 @@ async function main() {
       // Extract product name from filename
       const filenameProductName = filename.replace(/_[\d.]+_[^.]+\.qpkg$/, '');
 
-      // Build key for lookup
-      const key = `${filenameProductName}-${version}-${architecture}`;
+      // Build two keys for lookup:
+      // 1. With version from app.version (may be empty or inconsistent)
+      const keyWithVersion = `${filenameProductName}-${version}-${architecture}`;
+      // 2. Without version (for apps with empty or mismatched version)
+      const keyWithoutVersion = `${filenameProductName}--${architecture}`;
 
       console.log(`  🔍 ${platform.platformID} (${architecture})`);
 
-      // Check if exists in upload progress
-      if (uploadedIndex.has(key)) {
-        const uploadedFilename = uploadedIndex.get(key)!;
-        console.log(`     ✓ 已上传: ${uploadedFilename}`);
+      // Check if exists in upload progress using either key
+      let uploadedFilename: string | undefined;
+      if (uploadedIndex.has(keyWithVersion)) {
+        uploadedFilename = uploadedIndex.get(keyWithVersion)!;
+        console.log(`     ✓ 已上传: ${uploadedFilename} (完整匹配)`);
+      } else if (uploadedIndex.has(keyWithoutVersion)) {
+        uploadedFilename = uploadedIndex.get(keyWithoutVersion)!;
+        console.log(`     ✓ 已上传: ${uploadedFilename} (软件名+架构匹配)`);
+      }
+
+      if (uploadedFilename) {
         totalExisting++;
       } else {
         console.log(`     ➡️  需要下载`);
