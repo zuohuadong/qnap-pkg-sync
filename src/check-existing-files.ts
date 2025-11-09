@@ -1,42 +1,36 @@
 #!/usr/bin/env bun
 
 /**
- * Check Existing Files in CTFile
+ * Check Existing Files from Upload Progress
  *
- * 检查 CTFile 中已存在的文件，避免重复下载和上传
+ * 从 upload-progress.json 检查 update-apps.json 中的文件是否已上传
+ * 避免重复下载已上传的文件
  *
  * 功能：
- * 1. 读取 update-apps.json
- * 2. 查询 CTFile 中对应产品文件夹的文件列表
- * 3. 比较版本号和文件名
- * 4. 删除已存在且版本一致的条目
- * 5. 保存清理后的 JSON
+ * 1. 读取 config/upload-progress.json（已上传的文件记录）
+ * 2. 读取 config/update-apps.json（待下载的文件列表）
+ * 3. 按软件名称、版本号、架构匹配
+ * 4. 删除已上传的软件包（按架构）
+ * 5. 保存清理后的 update-apps.json
  */
 
 import { existsSync } from 'fs';
 import { join } from 'path';
-import { CTFileClient } from './ctfile';
-import { loadEnv, getEnv } from './env';
-import { checkFileExistsInCTFile } from './ctfile-utils';
+import { loadEnv } from './env';
+import { parseQpkgFilename } from './ctfile-utils';
+import { getFilenameFromUrl } from './utils/file';
+import type { AppsConfig, AppItem, Platform } from './types/index';
 
-interface AppItem {
-  name: string;
-  version: string;
-  category: string;
-  icon: string;
-  qpkg?: {
-    file: string;
-    platform?: {
-      architecture: number;
-      name: string;
-    };
-  };
-  location?: string;
-}
-
-interface AppsJson {
-  plugins: {
-    item: AppItem[];
+/**
+ * Upload progress record structure
+ */
+interface UploadProgress {
+  [filename: string]: {
+    signature: string;
+    ctfileUrl: string;
+    ctfileShortUrl?: string;
+    ctfileFolderUrl?: string;
+    uploadDate: string;
   };
 }
 
@@ -45,74 +39,126 @@ interface AppsJson {
  */
 async function main() {
   console.log('='.repeat(60));
-  console.log('检查 CTFile 中已存在的文件');
+  console.log('从上传记录检查待下载文件');
   console.log('='.repeat(60));
 
   // Load environment
   await loadEnv();
 
-  const session = getEnv('CTFILE_SESSION');
-  const rootFolderId = getEnv('CTFILE_FOLDER_ID');
+  // Get file paths
+  const progressFilePath = join(process.cwd(), 'config', 'upload-progress.json');
+  const updateFilePath = join(process.cwd(), 'config', 'update-apps.json');
 
-  // Initialize CTFile client
-  const ctfileClient = new CTFileClient(session);
-  console.log(`\n🔑 CTFile 配置:`);
-  console.log(`  Root folder ID: ${rootFolderId}`);
-
-  // Get config file path from command line or use default
-  const args = process.argv.slice(2);
-  const configFile = args[0] || 'config/update-apps.json';
-
-  const updateFilePath = configFile.startsWith('/')
-    ? configFile
-    : join(process.cwd(), configFile);
-
+  // Check if update-apps.json exists
   if (!existsSync(updateFilePath)) {
-    console.log(`\n⚠️  未找到 ${configFile}`);
-    console.log('   跳过检查，将下载所有文件');
+    console.log(`\n⚠️  未找到 config/update-apps.json`);
+    console.log('   没有待下载的文件');
     return;
   }
 
-  console.log(`\n📋 使用文件: ${configFile}`);
+  console.log(`\n📋 读取文件:`);
+  console.log(`  待下载列表: config/update-apps.json`);
+  console.log(`  上传记录: config/upload-progress.json`);
 
-  // Load JSON
-  const file = Bun.file(updateFilePath);
-  const appsData: AppsJson = await file.json();
+  // Load update-apps.json
+  const updateFile = Bun.file(updateFilePath);
+  const appsData: AppsConfig = await updateFile.json();
+  const apps = appsData.plugins.item || [];
 
-  const items = appsData.plugins.item || [];
-  console.log(`\n📦 总计 ${items.length} 个软件包`);
+  console.log(`\n📦 待下载软件包: ${apps.length} 个`);
 
-  if (items.length === 0) {
-    console.log('\n✓ 没有需要检查的软件包');
+  if (apps.length === 0) {
+    console.log('\n✓ 没有待下载的软件包');
     return;
   }
 
-  console.log('\n🔍 开始检查文件...\n');
+  // Load upload-progress.json
+  let uploadProgress: UploadProgress = {};
+  let uploadedCount = 0;
 
-  const itemsToKeep: AppItem[] = [];
-  const itemsToRemove: AppItem[] = [];
+  if (existsSync(progressFilePath)) {
+    const progressFile = Bun.file(progressFilePath);
+    uploadProgress = await progressFile.json();
+    uploadedCount = Object.keys(uploadProgress).length;
+    console.log(`📤 已上传文件记录: ${uploadedCount} 个`);
+  } else {
+    console.log(`📤 已上传文件记录: 0 个（未找到 upload-progress.json）`);
+  }
 
-  for (const item of items) {
-    const productName = item.name;
-    const version = item.version;
-    const architecture = item.qpkg?.platform?.name || 'unknown';
+  // Build index of uploaded files: productName-version-arch -> filename
+  const uploadedIndex = new Map<string, string>();
 
-    console.log(`\n📂 ${productName} v${version} [${architecture}]`);
+  for (const [filename, record] of Object.entries(uploadProgress)) {
+    const parsed = parseQpkgFilename(filename);
+    if (parsed.version && parsed.arch) {
+      // Extract product name from filename (before version)
+      const productName = filename.replace(/_[\d.]+_[^.]+\.qpkg$/, '');
+      const key = `${productName}-${parsed.version}-${parsed.arch}`;
+      uploadedIndex.set(key, filename);
+    }
+  }
 
-    const exists = await checkFileExistsInCTFile(
-      ctfileClient,
-      rootFolderId,
-      productName,
-      version,
-      architecture
-    );
+  console.log(`\n🔍 开始检查文件...\n`);
 
-    if (exists) {
-      console.log(`  ➡️  跳过: 文件已存在于 CTFile`);
-      itemsToRemove.push(item);
+  let totalPlatforms = 0;
+  let totalExisting = 0;
+  let totalMissing = 0;
+
+  // Process each app and its platforms
+  const updatedApps: AppItem[] = [];
+
+  for (const app of apps) {
+    const productName = app.name;
+    const version = app.version;
+
+    // Extract product name prefix (for matching with uploaded files)
+    // Example: "AdGuard Home (Premium)" -> "ADGuard"
+    const productPrefix = app.internalName || productName.split(' ')[0];
+
+    console.log(`\n📂 ${productName} v${version}`);
+
+    const remainingPlatforms: Platform[] = [];
+
+    for (const platform of app.platform) {
+      totalPlatforms++;
+
+      // Extract filename from URL
+      const filename = getFilenameFromUrl(platform.location);
+
+      // Parse version and architecture from filename
+      const parsed = parseQpkgFilename(filename);
+      const architecture = parsed.arch || 'unknown';
+
+      // Extract product name from filename
+      const filenameProductName = filename.replace(/_[\d.]+_[^.]+\.qpkg$/, '');
+
+      // Build key for lookup
+      const key = `${filenameProductName}-${version}-${architecture}`;
+
+      console.log(`  🔍 ${platform.platformID} (${architecture})`);
+
+      // Check if exists in upload progress
+      if (uploadedIndex.has(key)) {
+        const uploadedFilename = uploadedIndex.get(key)!;
+        console.log(`     ✓ 已上传: ${uploadedFilename}`);
+        totalExisting++;
+      } else {
+        console.log(`     ➡️  需要下载`);
+        totalMissing++;
+        remainingPlatforms.push(platform);
+      }
+    }
+
+    // If there are any platforms left to download, keep the app
+    if (remainingPlatforms.length > 0) {
+      updatedApps.push({
+        ...app,
+        platform: remainingPlatforms,
+      });
+
+      console.log(`  ℹ️  保留 ${remainingPlatforms.length}/${app.platform.length} 个平台需要下载`);
     } else {
-      console.log(`  ➡️  保留: 需要下载`);
-      itemsToKeep.push(item);
+      console.log(`  ✓ 所有平台已上传，删除该软件包`);
     }
   }
 
@@ -120,31 +166,27 @@ async function main() {
   console.log('\n' + '='.repeat(60));
   console.log('📊 检查结果');
   console.log('='.repeat(60));
-  console.log(`  总计: ${items.length} 个软件包`);
-  console.log(`  需要下载: ${itemsToKeep.length}`);
-  console.log(`  已存在跳过: ${itemsToRemove.length}`);
-
-  if (itemsToRemove.length > 0) {
-    console.log('\n📝 已跳过的软件包:');
-    for (const item of itemsToRemove) {
-      const arch = item.qpkg?.platform?.name || 'unknown';
-      console.log(`  - ${item.name} v${item.version} [${arch}]`);
-    }
-  }
+  console.log(`  总计软件包: ${apps.length}`);
+  console.log(`  总计平台: ${totalPlatforms}`);
+  console.log(`  已上传: ${totalExisting}`);
+  console.log(`  需要下载: ${totalMissing}`);
+  console.log(`  保留软件包: ${updatedApps.length}/${apps.length}`);
 
   // Save updated JSON
-  if (itemsToKeep.length < items.length) {
-    const updatedData: AppsJson = {
+  if (updatedApps.length < apps.length || totalExisting > 0) {
+    const updatedData: AppsConfig = {
       plugins: {
-        item: itemsToKeep,
+        cachechk: appsData.plugins.cachechk,
+        item: updatedApps,
       },
     };
 
     await Bun.write(updateFilePath, JSON.stringify(updatedData, null, 2));
-    console.log(`\n✓ 已更新: ${configFile}`);
-    console.log(`  删除了 ${itemsToRemove.length} 个已存在的软件包`);
+    console.log(`\n✓ 已更新: config/update-apps.json`);
+    console.log(`  删除了 ${apps.length - updatedApps.length} 个完全上传的软件包`);
+    console.log(`  删除了 ${totalExisting} 个已上传的平台`);
   } else {
-    console.log('\n✓ 所有软件包都需要下载，无需修改文件');
+    console.log('\n✓ 所有文件都需要下载，无需修改文件');
   }
 
   console.log('\n' + '='.repeat(60));
