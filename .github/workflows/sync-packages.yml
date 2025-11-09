@@ -9,11 +9,10 @@ on:
   workflow_dispatch:
     inputs:
       decrypt_config:
-        description: '解密 config.tar.gz.enc 到 config 目录'
+        description: '解密 config.tar.gz.enc 到 config 目录并上传到 artifacts'
         required: false
         type: boolean
         default: false
-
 
 # 取消正在运行的旧工作流
 concurrency:
@@ -21,10 +20,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  sync:
-    name: 同步 QNAP 软件包
+  # 任务1：解密配置文件并上传到 artifacts
+  decrypt-config:
+    name: 解密配置文件
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 小时超时
+    if: ${{ inputs.decrypt_config }}
 
     steps:
       - name: 检出代码
@@ -32,16 +32,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 设置 Bun 环境
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: 安装依赖
-        run: bun install --frozen-lockfile
-
       - name: 解密配置文件
-        if: ${{ inputs.decrypt_config }}
         env:
           ENCRYPTION_PASSWORD: ${{ secrets.ENCRYPTION_PASSWORD }}
         run: |
@@ -62,6 +53,52 @@ jobs:
 
           echo "✅ Config files restored:"
           ls -lh config/
+
+      - name: 上传配置文件到 Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-files
+          path: config/
+          retention-days: 90
+
+  # 任务2：同步软件包
+  sync:
+    name: 同步 QNAP 软件包
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 小时超时
+    needs: [decrypt-config]
+    if: always() && (needs.decrypt-config.result == 'success' || needs.decrypt-config.result == 'skipped')
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 设置 Bun 环境
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: 安装依赖
+        run: bun install --frozen-lockfile
+
+      - name: 创建必要的目录
+        run: |
+          mkdir -p downloads
+          mkdir -p config
+
+      - name: 从 Artifacts 恢复配置文件
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: config-files
+          path: config/
+
+      - name: 检查配置文件状态
+        run: |
+          echo "📋 当前配置文件："
+          ls -lh config/ || echo "  config 目录为空"
 
       - name: 启用 BBR 加速
         run: |
@@ -120,128 +157,35 @@ jobs:
 
           echo "✓ 环境变量配置完成"
 
-      - name: 创建必要的目录
+      - name: 1. 获取最新软件包列表 (fetch)
         run: |
-          mkdir -p downloads
-          mkdir -p config
-
-      - name: 恢复之前的 apps.json（用于增量检测）
-        if: ${{ !inputs.upload_only }}
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: config-apps-json
-          path: config/
-
-      - name: 恢复上传进度和元数据
-        if: ${{ !inputs.upload_only }}
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: metadata
-          path: config/
-
-      - name: 检查 apps.json 是否恢复成功
-        if: ${{ !inputs.upload_only }}
-        run: |
-          if [ -f config/apps.json ]; then
-            app_count=$(jq '.plugins.item | length' config/apps.json)
-            echo "✓ 成功恢复之前的 apps.json（包含 $app_count 个软件包）"
-            echo "   将进行增量更新检测"
-          else
-            echo "ℹ️  未找到之前的 apps.json"
-            echo "   原因可能是："
-            echo "   - 首次运行此工作流"
-            echo "   - Artifact 已过期（保留期 90 天）"
-            echo "   - Artifact 已被手动清理"
-            echo "   本次将获取完整软件包列表并执行完整下载"
-          fi
-
-      - name: 获取并检查软件包更新
-        if: ${{ !inputs.upload_only }}
-        id: check_updates
-        run: |
-          echo "📥 获取最新的 QNAP 软件包列表..."
-
-          # 使用 fetch 命令获取最新列表并检测差异
+          echo "📥 步骤 1: 获取最新的 QNAP 软件包列表..."
           bun run fetch
 
-          # 检查是否生成了 update-apps.json
-          if [ -f config/update-apps.json ]; then
-            update_count=$(jq '.plugins.item | length' config/update-apps.json)
-            echo "📋 检测到 $update_count 个新增或更新的软件包"
-            echo "has_updates=true" >> $GITHUB_OUTPUT
-            echo "update_count=$update_count" >> $GITHUB_OUTPUT
-
-            # 显示更新列表
-            echo ""
-            echo "更新列表："
-            jq -r '.plugins.item[] | "  • \(.name) v\(.version)"' config/update-apps.json
-          else
-            echo "✓ 软件包列表无更新"
-            echo "has_updates=false" >> $GITHUB_OUTPUT
-            echo "update_count=0" >> $GITHUB_OUTPUT
-          fi
-
-          # 保存 apps.json 的总数
           if [ -f config/apps.json ]; then
             total_count=$(jq '.plugins.item | length' config/apps.json)
-            echo "total_count=$total_count" >> $GITHUB_OUTPUT
-            echo "📊 软件包总数: $total_count"
+            echo "✓ 软件包总数: $total_count"
           fi
 
-      - name: 检查 CTFile 中已存在的文件
-        if: ${{ !inputs.upload_only && steps.check_updates.outputs.has_updates == 'true' && !inputs.force_download }}
-        id: check_existing
+      - name: 2. 检查上传状态 (check-upload)
         run: |
-          echo "🔍 检查 CTFile 中已存在的文件，避免重复下载..."
-          echo ""
+          echo "🔍 步骤 2: 检查上传状态..."
+          bun run check-upload
 
-          # 运行检查脚本
+      - name: 3. 检查 CTFile 已存在文件 (check-existing)
+        run: |
+          echo "🔍 步骤 3: 检查 CTFile 中已存在的文件..."
           bun run check-existing
 
-          # 统计清理后的数量
-          if [ -f config/update-apps.json ]; then
-            remaining_count=$(jq '.plugins.item | length' config/update-apps.json)
-            removed_count=$((${{ steps.check_updates.outputs.update_count }} - remaining_count))
-
-            echo ""
-            echo "📊 检查结果："
-            echo "  原计划下载: ${{ steps.check_updates.outputs.update_count }} 个"
-            echo "  已存在跳过: $removed_count 个"
-            echo "  实际需要下载: $remaining_count 个"
-            echo ""
-
-            echo "remaining_count=$remaining_count" >> $GITHUB_OUTPUT
-            echo "removed_count=$removed_count" >> $GITHUB_OUTPUT
-
-            # 如果所有文件都已存在，标记为无需下载
-            if [ "$remaining_count" -eq 0 ]; then
-              echo "✓ 所有软件包都已存在于 CTFile，无需下载"
-              echo "needs_download=false" >> $GITHUB_OUTPUT
-            else
-              echo "needs_download=true" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "needs_download=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: 增量下载更新的软件包
-        if: ${{ !inputs.upload_only && (steps.check_updates.outputs.has_updates == 'true' || inputs.force_download) }}
+      - name: 4. 下载更新的软件包 (update)
         run: |
-          if [ "${{ inputs.force_download }}" = "true" ]; then
-            echo "🔄 强制下载模式：下载所有软件包"
-            bun run download:all
-          else
-            echo "⚡ 增量下载模式：只下载 ${{ steps.check_updates.outputs.update_count }} 个更新的软件包"
-            bun run download:update
-          fi
+          echo "⬇️ 步骤 4: 下载更新的软件包..."
+          bun run update
 
           echo ""
           echo "📊 下载统计："
           if [ -f config/metadata.json ]; then
             echo "  元数据文件: ✓"
-            jq -r '.[] | "  - \(.productName) \(.version) [\(.architecture)]"' config/metadata.json | head -20
             total=$(jq '. | length' config/metadata.json)
             echo "  总计: $total 个软件包"
           else
@@ -252,77 +196,16 @@ jobs:
           echo "💾 下载文件列表："
           ls -lh downloads/*.qpkg 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}' || echo "  未找到 QPKG 文件"
 
-      - name: 跳过下载（无更新）
-        if: ${{ !inputs.upload_only && steps.check_updates.outputs.has_updates == 'false' && !inputs.force_download }}
+      - name: 5. 上传到 CTFile (upload)
         run: |
-          echo "✓ 软件包列表无更新，跳过下载"
-          echo "📊 当前软件包总数: ${{ steps.check_updates.outputs.total_count }}"
-          echo ""
-          echo "如需强制下载，请使用 force_download 参数手动触发工作流"
-
-      - name: 恢复上传进度和元数据（用于重新下载失败的上传）
-        if: ${{ !inputs.download_only && !inputs.upload_only }}
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: metadata
-          path: config/
-
-      - name: 检查并重新下载未上传的文件
-        if: ${{ !inputs.download_only && !inputs.upload_only && steps.check_updates.outputs.has_updates == 'false' }}
-        run: |
-          echo "🔍 检查是否有下载但未成功上传的文件..."
-
-          # 如果没有 metadata.json，说明没有之前的下载记录
-          if [ ! -f config/metadata.json ]; then
-            echo "ℹ 未找到之前的 metadata.json，无需重新下载"
-            exit 0
-          fi
-
-          # 检查downloads目录是否有实际文件
-          qpkg_count=$(ls -1 downloads/*.qpkg 2>/dev/null | wc -l || echo "0")
-
-          if [ "$qpkg_count" -eq 0 ]; then
-            echo "⚠ 发现 metadata.json 但 downloads 目录为空，需要重新下载"
-            metadata_count=$(jq '. | length' config/metadata.json)
-            echo "  将重新下载 $metadata_count 个文件"
-
-            # 清空 metadata 文件以强制重新下载
-            rm -f config/metadata.json config/metadata-uploaded.json config/upload-progress.json
-
-            # 检查 CTFile 中已存在的文件（对 apps.json 进行过滤）
-            echo ""
-            echo "🔍 检查 CTFile 中是否已存在这些文件..."
-            bun run src/check-existing-files.ts config/apps.json
-
-            # 重新下载所有软件包（已存在的会被跳过）
-            echo ""
-            echo "🔄 开始重新下载..."
-            bun run download:all
-
-            echo ""
-            echo "📊 重新下载统计："
-            if [ -f config/metadata.json ]; then
-              total=$(jq '. | length' config/metadata.json)
-              echo "  总计: $total 个软件包"
-            fi
-          else
-            echo "✓ downloads 目录包含 $qpkg_count 个文件，无需重新下载"
-          fi
-
-      - name: 上传到 CTFile
-        if: ${{ !inputs.download_only }}
-        run: |
-          echo "开始上传到 CTFile..."
+          echo "⬆️ 步骤 5: 上传到 CTFile..."
 
           # 检查是否有文件需要上传
           if ! ls downloads/*.qpkg 1> /dev/null 2>&1; then
             echo "⚠ 没有文件需要上传"
-            exit 0
+          else
+            bun run upload
           fi
-
-          # 执行上传
-          bun run src/upload.ts
 
           echo ""
           echo "📊 上传结果："
@@ -335,76 +218,14 @@ jobs:
             echo "  成功: $success/$total"
           fi
 
-      - name: 上传下载进度为 Artifact
+      - name: 保存配置文件到 Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: upload-progress
-          path: config/upload-progress.json
-          retention-days: 30
-          if-no-files-found: ignore
-
-      - name: 上传元数据为 Artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: metadata
-          path: |
-            config/metadata.json
-            config/metadata-uploaded.json
+          name: config-files
+          path: config/
           retention-days: 90
-          if-no-files-found: ignore
-
-      - name: 保存 apps.json 为 Artifact（用于下次增量检测）
-        if: ${{ !inputs.upload_only }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: config-apps-json
-          path: config/apps.json
-          retention-days: 90
-          if-no-files-found: ignore
-
-      - name: 提交更新的文件
-        if: ${{ !inputs.download_only && !inputs.upload_only }}
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-
-          # 检查是否有变化（现在 metadata 文件在 config/ 目录，通过 Artifacts 管理）
-          # 这里主要是为了兼容性，实际上可能不会有文件需要提交
-          if git diff --cached --quiet && git diff --quiet; then
-            echo "没有文件需要提交（元数据文件现在通过 GitHub Actions Artifacts 管理）"
-          else
-            # 统计更新信息
-            if [ "${{ steps.check_updates.outputs.has_updates }}" = "true" ]; then
-              update_type="增量更新: ${{ steps.check_updates.outputs.update_count }} 个软件包"
-            else
-              update_type="元数据更新"
-            fi
-
-            # 创建提交消息
-            commit_msg="自动更新: ${update_type}
-
-            🤖 由 GitHub Actions 自动生成
-            📅 更新时间: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-            🔗 工作流: ${{ github.workflow }}
-            🔢 运行 ID: ${{ github.run_id }}"
-
-            # 添加软件包数量（如果有）
-            if [ -f config/apps.json ]; then
-              pkg_count=$(jq '.plugins.item | length' config/apps.json)
-              commit_msg="${commit_msg}
-            📦 软件包总数: ${pkg_count}
-            ℹ  配置文件已保存到 GitHub Actions Artifacts"
-            fi
-
-            git commit -m "$commit_msg"
-
-            git push
-            echo "✓ 已提交并推送更新"
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          overwrite: true
 
       - name: 生成工作流摘要
         if: always()
