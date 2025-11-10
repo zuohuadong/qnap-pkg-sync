@@ -88,17 +88,39 @@ jobs:
           mkdir -p downloads
           mkdir -p config
 
-      - name: 从 Artifacts 恢复配置文件
-        continue-on-error: true
-        uses: actions/download-artifact@v4
+      - name: 恢复 config 缓存
+        uses: actions/cache@v4
         with:
-          name: config-files
           path: config/
+          key: config-state-${{ github.run_number }}
+          restore-keys: |
+            config-state-
 
       - name: 检查配置文件状态
         run: |
           echo "📋 当前配置文件："
           ls -lh config/ || echo "  config 目录为空"
+          echo ""
+
+          if [ -f config/upload-progress.json ]; then
+            echo "✓ 找到上传进度缓存"
+            uploaded_count=$(jq '. | length' config/upload-progress.json)
+            echo "  已上传: $uploaded_count 个文件"
+          else
+            echo "ℹ️  未找到上传进度缓存（首次运行或缓存过期）"
+          fi
+
+          if [ -f config/apps.json ]; then
+            echo "✓ 找到软件包列表缓存"
+            apps_count=$(jq '.plugins.item | length' config/apps.json)
+            echo "  软件包总数: $apps_count"
+          fi
+
+          if [ -f config/metadata.json ]; then
+            echo "✓ 找到元数据缓存"
+            metadata_count=$(jq '. | length' config/metadata.json)
+            echo "  已下载: $metadata_count 个文件"
+          fi
 
       - name: 启用 BBR 加速
         run: |
@@ -218,7 +240,7 @@ jobs:
             echo "  成功: $success/$total"
           fi
 
-      - name: 保存配置文件到 Artifacts
+      - name: 保存配置文件到 Artifacts（用于手动下载查看）
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -226,6 +248,7 @@ jobs:
           path: config/
           retention-days: 90
           overwrite: true
+        # 注意：状态持久化通过 Cache 完成，Artifacts 仅用于手动下载查看
 
       - name: 生成工作流摘要
         if: always()
