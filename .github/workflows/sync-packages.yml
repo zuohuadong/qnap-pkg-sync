@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       decrypt_config:
-        description: '解密 config.tar.gz.enc 到 config 目录并上传到 artifacts'
+        description: '解密 config.tar.gz.enc 到 config 目录并保存到 Cache'
         required: false
         type: boolean
         default: false
@@ -20,7 +20,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # 任务1：解密配置文件并上传到 artifacts
+  # 任务1：解密配置文件并保存到 Cache
   decrypt-config:
     name: 解密配置文件
     runs-on: ubuntu-latest
@@ -32,7 +32,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 解密配置文件
+      - name: 解��配置文件
         env:
           ENCRYPTION_PASSWORD: ${{ secrets.ENCRYPTION_PASSWORD }}
         run: |
@@ -54,12 +54,11 @@ jobs:
           echo "✅ Config files restored:"
           ls -lh config/
 
-      - name: 上传配置文件到 Artifacts
-        uses: actions/upload-artifact@v4
+      - name: 保存 config 到 Cache
+        uses: actions/cache/save@v4
         with:
-          name: config-files
           path: config/
-          retention-days: 90
+          key: config-state-${{ github.run_number }}
 
   # 任务2：同步软件包
   sync:
@@ -239,16 +238,6 @@ jobs:
             total=$(jq '. | length' config/metadata-uploaded.json)
             echo "  成功: $success/$total"
           fi
-
-      - name: 保存配置文件到 Artifacts（用于手动下载查看）
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: config-files
-          path: config/
-          retention-days: 90
-          overwrite: true
-        # 注意：状态持久化通过 Cache 完成，Artifacts 仅用于手动下载查看
 
       - name: 生成工作流摘要
         if: always()
