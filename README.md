@@ -7,8 +7,8 @@ QNAP 软件包同步工具，用于获取软件列表、批量下载和上传分
 本项目设计为开源使用，所有敏感配置都**不会提交到 Git 仓库**：
 
 - ✅ `config/` 目录已加入 `.gitignore`
-- ✅ CI 使用 **GitHub Actions Artifacts** 管理配置
-- ✅ 配置文件在 Artifacts 中保留 90 天
+- ✅ CI 使用 **GitHub Actions Cache** 管理配置
+- ✅ Cache 每次访问自动续期 7 天（定时任务每日运行，实际上持久保存）
 - ✅ 可以安全地 fork 和分享项目
 
 
@@ -89,7 +89,7 @@ WEBDAV_ROOT_PATH=/qnaporg
 - ✅ `config.example/` 是示例配置，可以安全提交
 - ❌ `config/` 包含敏感信息（下载签名等），已加入 `.gitignore`
 - ❌ `.env` 包含账号密码，已加入 `.gitignore`
-- 📦 CI/CD 使用 **GitHub Actions Artifacts** 管理配置文件（保留 90 天）
+- 📦 CI/CD 使用 **GitHub Actions Cache** 管理配置文件（自动续期）
 
 ## 安装
 
@@ -124,7 +124,21 @@ bun run fetch
    • OpenList v4.1.7 (new)
 ```
 
-### 步骤 2: 下载软件包
+### 步骤 2: 检查 CTFile 已存在文件（可选）
+
+在下载前，可以检查 CTFile 中已经存在的文件，避免重复上传：
+
+```bash
+bun run check-existing
+```
+
+这将：
+1. 遍历 CTFile 指定文件夹下的所有子文件夹
+2. 提取已上传的文件信息（文件名、版本号）
+3. 与本地 `config/apps.json` 对比
+4. 生成智能的增量下载列表，只下载未上传的文件
+
+### 步骤 3: 下载软件包
 
 #### 🚀 增量下载（推荐）
 
@@ -170,7 +184,21 @@ bun run download "OpenList"
 
 下载完成后会自动生成 `config/metadata.json`，包含所有下载文件的元数据。
 
-### 步骤 3: 上传到 CTFile 并生成分享链接
+### 步骤 4: 检查上传状态（可选）
+
+在上传前，可以检查哪些文件已经上传过，避免重复上传：
+
+```bash
+bun run check-upload
+```
+
+这将：
+1. 读取 `config/upload-progress.json`（上传进度缓存）
+2. 对比 `config/metadata.json` 中的文件
+3. 生成需要上传的文件列表
+4. 显示已上传和待上传的文件统计
+
+### 步骤 5: 上传到 CTFile 并生成分享链接
 
 ```bash
 bun run upload
@@ -287,22 +315,30 @@ QNAP XML Fetcher
 ├── .env                    # 环境变量配置
 ├── .github/
 │   └── workflows/
-│       └── sync-packages.yml  # GitHub Actions CI 配置（支持增量更新）
+│       └── sync-packages.yml  # GitHub Actions CI 配置
 ├── config/
 │   ├── apps.json          # 软件列表 JSON（含敏感签名，不提交到 Git）
-│   └── update-apps.json   # 增量更新列表（临时文件，不提交）
-├── downloads/              # 下载的软件包
+│   ├── update-apps.json   # 增量更新列表（临时文件）
 │   ├── metadata.json      # 下载元数据
+│   └── upload-progress.json  # 上传进度缓存
+├── downloads/              # 下载的软件包
 │   ├── metadata-uploaded.json  # 上传元数据
 │   └── PACKAGES.md        # 软件包清单
 ├── src/
 │   ├── env.ts             # 环境变量工具函数
 │   ├── fetch-xml.ts       # 获取软件列表 + 差异检测
-│   ├── download.ts        # 下载主程序
+│   ├── download.ts        # 下载主程序（下载所有）
 │   ├── download-apps.ts   # 下载逻辑实现（含增量下载）
 │   ├── download-updates.ts # 增量下载入口
-│   ├── upload.ts          # 上传到 CTFile
-│   └── ctfile.ts          # CTFile API 客户端
+│   ├── check-existing-files.ts # 检查 CTFile 已存在文件
+│   ├── check-upload.ts    # 检查上传状态和进度
+│   ├── upload.ts          # 上传到 CTFile（支持 WebDAV fallback）
+│   ├── force-sync.ts      # 强制同步（恢复错误状态）
+│   ├── ctfile.ts          # CTFile API 客户端
+│   ├── ctfile-utils.ts    # CTFile 工具函数
+│   ├── webdav-client.ts   # WebDAV 客户端（备用上传方案）
+│   ├── diagnose-ctfile.ts # CTFile 诊断工具
+│   └── check-folders.ts   # 检查文件夹结构
 ├── package.json
 └── README.md
 ```
@@ -315,6 +351,74 @@ QNAP XML Fetcher
   - `xml2js`: XML 转 JSON 解析器
 
 ## 技术亮点
+
+### CTFile 文件存在性检查
+
+通过 CTFile API 遍历云端文件夹，检查已上传的文件：
+
+```typescript
+// 获取文件夹内容
+const folders = await ctfile.getFolderContents(folderId);
+
+// 提取文件名中的版本信息
+const existingVersions = new Set(
+  files.map(f => extractVersionFromFilename(f.name))
+);
+
+// 智能跳过已存在的版本
+if (existingVersions.has(app.version)) {
+  console.log(`✓ 跳过: ${app.name} ${app.version} (已存在)`);
+}
+```
+
+避免重复下载和上传，大幅节省时间。
+
+### 上传进度缓存
+
+使用 `upload-progress.json` 记录上传成功的文件：
+
+```typescript
+// 上传成功后记录进度
+uploadProgress[filename] = {
+  uploadedAt: new Date().toISOString(),
+  ctfileUrl: shareUrl,
+  folderId: targetFolderId
+};
+
+// 下次运行时跳过已上传的文件
+if (uploadProgress[filename]) {
+  console.log(`✓ 跳过: ${filename} (已上传)`);
+}
+```
+
+支持断点续传，上传中断后可恢复。
+
+### WebDAV 备用上传
+
+CTFile 上传失败时自动切换到 WebDAV：
+
+```typescript
+try {
+  // 尝试 CTFile 上传
+  await ctfile.uploadFile(file);
+} catch (error) {
+  // 失败时 fallback 到 WebDAV
+  await webdav.uploadFile(file);
+}
+```
+
+提高上传成功率，确保数据安全。
+
+### BBR TCP 拥塞控制
+
+CI 环境自动启用 BBR 算法：
+
+```bash
+sudo sysctl -w net.core.default_qdisc=fq
+sudo sysctl -w net.ipv4.tcp_congestion_control=bbr
+```
+
+显著提升下载速度，特别是在高延迟网络环境中。
 
 ### 智能增量更新
 
@@ -364,12 +468,14 @@ while (true) {
 
 项目包含完整的 CI/CD 配置，支持：
 
-- ⏰ **定时任务**：每周一自动检查更新
-- 🔍 **智能检测**：自动对比差异，只下载更新
-- ⚡ **增量下载**：节省时间和带宽
-- 📤 **自动上传**：上传到 CTFile 并生成分享链接
-- 📝 **自动提交**：将更新提交回仓库
-- 🎯 **手动触发**：支持强制全量下载、仅下载、仅上传等选项
+- ⏰ **定时任务**：每天自动检查更新（UTC 23:00 / 北京时间 7:00）
+- 🔍 **智能检测**：自动对比差异，避免重复下载
+- 🚀 **CTFile 文件检查**：检查云端已存在的文件，智能跳过
+- ⚡ **增量下载**：只下载需要的文件，节省时间和带宽
+- 📤 **断点续传**：支持上传进度缓存，失败后可恢复
+- 🌐 **WebDAV 备份**：CTFile 上传失败时自动切换到 WebDAV
+- ⚡ **BBR 加速**：启用 BBR TCP 拥塞控制算法，提升下载速度
+- 📝 **状态持久化**：使用 GitHub Actions Cache 保存配置和进度
 
 ### 使用方式
 
@@ -395,7 +501,7 @@ while (true) {
 #### 2. **运行方式**
 
 **自动运行**：
-- 每周一 UTC 0:00（北京时间 8:00）自动运行
+- 每天 UTC 23:00（北京时间 7:00）自动运行
 - 自动检测更新、增量下载、上传
 
 **手动触发**：
@@ -403,39 +509,70 @@ while (true) {
    - 选择 "Sync QNAP Packages" 工作流
    - 点击 "Run workflow"
    - 可选参数：
-     - `force_download`: 强制下载所有软件包
-     - `download_only`: 仅下载，不上传
-     - `upload_only`: 仅上传已有文件
+     - `decrypt_config`: 解密本地加密的配置文件到 Cache（首次设置时使用）
 
 ### CI 工作流程
 
 ```
-检出代码 → 设置 Bun → 安装依赖
+检出代码 → 设置 Bun → 安装依赖 → 启用 BBR 加速
     ↓
-从 Artifacts 恢复上次的 apps.json
+从 Cache 恢复配置文件（apps.json, upload-progress.json, metadata.json）
     ↓
-获取软件列表（fetch）→ 检测差异
+步骤1: 获取最新软件列表（fetch）→ 检测差异
     ↓
-有更新？
-    ├─ 是 → 增量下载 → 上传到 CTFile → 保存 apps.json 到 Artifacts → 提交元数据
-    └─ 否 → 跳过下载 → 结束
+步骤2: 检查上传状态（check-upload）→ 分析已上传文件
+    ↓
+步骤3: 检查 CTFile 已存在文件（check-existing）→ 智能跳过
+    ↓
+步骤4: 下载更新的软件包（update）→ 只下载需要的
+    ↓
+步骤5: 上传到 CTFile（upload）→ 失败时 fallback 到 WebDAV
+    ↓
+自动更新 Cache（config/ 目录）→ 下次运行恢复
 ```
 
 **配置管理说明**：
-- 📦 `apps.json` 保存在 **GitHub Actions Artifacts** 中（90 天保留期）
+- 📦 配置文件保存在 **GitHub Actions Cache** 中
+- ⏰ Cache 每次访问自动续期 7 天（定时任务每日运行，实际持久保存）
 - 🔒 **不会提交到 Git 仓库**，保护隐私（包含敏感的下载签名）
-- 🔄 每次运行自动恢复和更新
-- ✅ 支持增量检测和下载
-- 🛡️ ���个 `config/` 目录已加入 `.gitignore`
+- 🔄 每次运行自动恢复和更新配置
+- ✅ 支持断点续传和进度恢复
+- 🛡️ 整个 `config/` 目录已加入 `.gitignore`
 
 ### Fork 项目使用指南
 
 如果你 fork 了本项目：
 
 1. **配置 Secrets**：按照上述说明在你的仓库中添加必要的 Secrets
-2. **首次运行**：手动触发工作流，系统会自动生成 `apps.json`
-3. **后续运行**：CI 会自动从 Artifacts 恢复配置，实现增量更新
+2. **首次运行**：手动触发工作流，系统会自动生成 `apps.json` 和 Cache
+3. **后续运行**：CI 会自动从 Cache 恢复配置，实现增量更新和断点续传
 4. **本地开发**：运行 `bun run fetch` 生成本地配置文件
+5. **配置加密**（可选）：可以将本地 `config/` 目录加密为 `config.tar.gz.enc`，通过手动触发工作流中的 `decrypt_config` 选项导入到 Cache
+
+## 可用命令
+
+```bash
+# 获取软件列表并检测差异
+bun run fetch
+
+# 检查 CTFile 中已存在的文件
+bun run check-existing
+
+# 检查上传状态
+bun run check-upload
+
+# 下载所有软件包
+bun run download
+
+# 下载更新的软件包（增量）
+bun run update
+
+# 上传到 CTFile
+bun run upload
+
+# 强制同步（用于恢复错误状态）
+bun run force-sync
+```
 
 ## 许可证
 
