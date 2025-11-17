@@ -422,19 +422,18 @@ async function removeDownloadedApps(
     app => !downloadedApps.has(app.internalName || app.name)
   );
 
+  // Always update the file with remaining apps (even if empty)
+  const updatedConfig: AppsConfig = {
+    plugins: {
+      cachechk: config.plugins.cachechk,
+      item: remainingApps,
+    },
+  };
+  await Bun.write(updateConfigPath, JSON.stringify(updatedConfig, null, 2));
+
   if (remainingApps.length === 0) {
-    // Remove the file if no apps remaining
-    console.log(`\n🗑️  All updates downloaded, removing ${updateConfigPath}`);
-    await Bun.$`rm -f ${updateConfigPath}`.quiet();
+    console.log(`\n✓ All updates downloaded, cleared ${updateConfigPath}`);
   } else {
-    // Update the file with remaining apps
-    const updatedConfig: AppsConfig = {
-      plugins: {
-        cachechk: config.plugins.cachechk,
-        item: remainingApps,
-      },
-    };
-    await Bun.write(updateConfigPath, JSON.stringify(updatedConfig, null, 2));
     console.log(`\n📝 Updated ${updateConfigPath} (${remainingApps.length} apps remaining)`);
   }
 }

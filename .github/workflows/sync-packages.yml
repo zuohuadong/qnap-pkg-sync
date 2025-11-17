@@ -204,18 +204,16 @@ jobs:
           bun run update
 
           echo ""
-          echo "📊 下载统计："
-          if [ -f config/metadata.json ]; then
-            echo "  元数据文件: ✓"
-            total=$(jq '. | length' config/metadata.json)
-            echo "  总计: $total 个软件包"
+          echo "📊 本次下载统计："
+          if ls downloads/*.qpkg 1> /dev/null 2>&1; then
+            count=$(ls downloads/*.qpkg | wc -l)
+            echo "  ✅ 成功下载: $count 个软件包"
+            echo ""
+            echo "📦 文件列表："
+            ls -lh downloads/*.qpkg | awk '{print "  - " $9 " (" $5 ")"}'
           else
-            echo "  ⚠ 未找到元数据文件"
+            echo "  ℹ️  无新软件包需要下载（所有更新已同步）"
           fi
-
-          echo ""
-          echo "💾 下载文件列表："
-          ls -lh downloads/*.qpkg 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}' || echo "  未找到 QPKG 文件"
 
       - name: 5. 上传到 CTFile (upload)
         run: |
