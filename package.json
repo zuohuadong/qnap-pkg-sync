@@ -7,6 +7,7 @@
     "fetch": "bun run src/fetch-xml.ts",
     "check-existing": "bun run src/check-existing-files.ts",
     "check-upload": "bun run src/check-upload.ts",
+    "check-missing": "bun run src/check-missing-files.ts",
     "download": "bun run src/download.ts",
     "update": "bun run src/download-updates.ts",
     "upload": "bun run src/upload.ts",
