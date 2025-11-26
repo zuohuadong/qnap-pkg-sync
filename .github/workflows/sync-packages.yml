@@ -13,6 +13,11 @@ on:
         required: false
         type: boolean
         default: false
+      force_sync:
+        description: '强制同步：检查 apps.json 与 CTFile 的差异，将缺失的软件包添加到 update-apps.json'
+        required: false
+        type: boolean
+        default: false
 
 # 取消正在运行的旧工作流
 concurrency:
@@ -32,7 +37,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 解��配置文件
+      - name: 解密配置文件
         env:
           ENCRYPTION_PASSWORD: ${{ secrets.ENCRYPTION_PASSWORD }}
         run: |
@@ -193,6 +198,27 @@ jobs:
           echo "🔍 步骤 2: 检查上传状态..."
           bun run check-upload
 
+      - name: 2.5. 强制同步模式 - 检查缺失文件 (check-missing)
+        if: ${{ inputs.force_sync }}
+        run: |
+          echo "🔄 步骤 2.5: 强制同步 - 检查 CTFile 中缺失的文件..."
+          bun run check-missing
+
+          echo ""
+          echo "📊 检查结果："
+          if [ -f config/update-apps.json ]; then
+            missing_count=$(jq '.plugins.item | length' config/update-apps.json)
+            echo "  缺失的软件包: $missing_count"
+
+            if [ "$missing_count" -gt 0 ]; then
+              echo ""
+              echo "📋 需要下载的软件包:"
+              jq -r '.plugins.item[] | "  - \(.name) v\(.version) (\(.platform | length) 个平台)"' config/update-apps.json
+            fi
+          else
+            echo "  ⚠️  未生成 update-apps.json"
+          fi
+
       - name: 3. 检查 CTFile 已存在文件 (check-existing)
         run: |
           echo "🔍 步骤 3: 检查 CTFile 中已存在的文件..."
@@ -204,18 +230,16 @@ jobs:
           bun run update
 
           echo ""
-          echo "📊 下载统计："
-          if [ -f config/metadata.json ]; then
-            echo "  元数据文件: ✓"
-            total=$(jq '. | length' config/metadata.json)
-            echo "  总计: $total 个软件包"
+          echo "📊 本次下载统计："
+          if ls downloads/*.qpkg 1> /dev/null 2>&1; then
+            count=$(ls downloads/*.qpkg | wc -l)
+            echo "  ✅ 成功下载: $count 个软件包"
+            echo ""
+            echo "📦 文件列表："
+            ls -lh downloads/*.qpkg | awk '{print "  - " $9 " (" $5 ")"}'
           else
-            echo "  ⚠ 未找到元数据文件"
+            echo "  ℹ️  无新软件包需要下载（所有更新已同步）"
           fi
-
-          echo ""
-          echo "💾 下载文件列表："
-          ls -lh downloads/*.qpkg 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}' || echo "  未找到 QPKG 文件"
 
       - name: 5. 上传到 CTFile (upload)
         run: |
@@ -245,7 +269,17 @@ jobs:
           echo "## 📦 QNAP 软件包同步摘要" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          if [ -f config/metadata.json ]; then
+          # 检查是否有实际的下载操作（基于 update-apps.json 或下载的文件）
+          has_downloads=false
+          if [ -f config/update-apps.json ] && [ -s config/update-apps.json ]; then
+            update_count=$(jq '. | length' config/update-apps.json)
+            if [ "$update_count" -gt 0 ]; then
+              has_downloads=true
+            fi
+          fi
+
+          # 如果有下载操作，显示本次下载统计
+          if [ "$has_downloads" = true ] && [ -f config/metadata.json ]; then
             total=$(jq '. | length' config/metadata.json)
             echo "### 下载统计" >> $GITHUB_STEP_SUMMARY
             echo "- 总文件数: $total" >> $GITHUB_STEP_SUMMARY
@@ -254,9 +288,20 @@ jobs:
             echo "### 产品列表" >> $GITHUB_STEP_SUMMARY
             jq -r '.[] | "- **\(.productName)** \(.version) (\(.architecture))"' config/metadata.json | sort -u >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
+          elif [ "$has_downloads" = false ]; then
+            echo "### 本次运行状态" >> $GITHUB_STEP_SUMMARY
+            echo "ℹ️  没有发现新的或更新的软件包，无需下载" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
           fi
 
-          if [ -f config/metadata-uploaded.json ]; then
+          # 检查是否有实际的上传操作
+          has_uploads=false
+          if ls downloads/*.qpkg 1> /dev/null 2>&1; then
+            has_uploads=true
+          fi
+
+          # 如果有上传操作，显示上传统计
+          if [ "$has_uploads" = true ] && [ -f config/metadata-uploaded.json ]; then
             success=$(jq '[.[] | select(.ctfileUrl != null)] | length' config/metadata-uploaded.json)
             failed=$(jq '[.[] | select(.ctfileUrl == null)] | length' config/metadata-uploaded.json)
 
