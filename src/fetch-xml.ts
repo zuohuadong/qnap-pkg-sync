@@ -118,15 +118,15 @@ function findDifferences(oldConfig: AppsConfig | null, newConfig: AppsConfig): A
       // Version updated
       differences.push(newApp);
     } else {
-      // Check if platforms changed
+      // Check if platforms changed (including signature changes for re-published packages)
       const oldPlatformsSet = new Set(
-        oldApp.platform.map(p => `${p.platformID}:${p.location}`)
+        oldApp.platform.map(p => `${p.platformID}:${p.location}:${p.signature}`)
       );
 
-      // Check if there are new platforms or updated platforms
+      // Check if there are new platforms, updated platforms, or re-published packages (signature change)
       let hasChanges = false;
       for (const platform of newApp.platform) {
-        const key = `${platform.platformID}:${platform.location}`;
+        const key = `${platform.platformID}:${platform.location}:${platform.signature}`;
         if (!oldPlatformsSet.has(key)) {
           hasChanges = true;
           break;

@@ -86,7 +86,7 @@ async function main() {
   }
 
   // Build index of uploaded files: productName-version-arch -> filename
-  // Support both keys: with version from filename and without version (for empty app.version)
+  // Only use exact version matching to avoid false positives when new versions are released
   const uploadedIndex = new Map<string, string>();
 
   for (const [filename, record] of Object.entries(uploadProgress)) {
@@ -95,13 +95,9 @@ async function main() {
       // Extract product name from filename (before version)
       const productName = filename.replace(/_[\d.]+_[^.]+\.qpkg$/, '');
 
-      // Key with version from filename
+      // Key with version from filename (exact match only)
       const keyWithVersion = `${productName}-${parsed.version}-${parsed.arch}`;
       uploadedIndex.set(keyWithVersion, filename);
-
-      // Also add key without version (empty string) to handle apps with empty version field
-      const keyWithoutVersion = `${productName}--${parsed.arch}`;
-      uploadedIndex.set(keyWithoutVersion, filename);
     }
   }
 
@@ -139,22 +135,17 @@ async function main() {
       // Extract product name from filename
       const filenameProductName = filename.replace(/_[\d.]+_[^.]+\.qpkg$/, '');
 
-      // Build two keys for lookup:
-      // 1. With version from app.version (may be empty or inconsistent)
-      const keyWithVersion = `${filenameProductName}-${version}-${architecture}`;
-      // 2. Without version (for apps with empty or mismatched version)
-      const keyWithoutVersion = `${filenameProductName}--${architecture}`;
+      // Use version from filename for more reliable matching (app.version may be empty or inconsistent)
+      const filenameVersion = parsed.version || version;
+      const keyWithVersion = `${filenameProductName}-${filenameVersion}-${architecture}`;
 
       console.log(`  🔍 ${platform.platformID} (${architecture})`);
 
-      // Check if exists in upload progress using either key
+      // Check if exists in upload progress using exact version match only
       let uploadedFilename: string | undefined;
       if (uploadedIndex.has(keyWithVersion)) {
         uploadedFilename = uploadedIndex.get(keyWithVersion)!;
-        console.log(`     ✓ 已上传: ${uploadedFilename} (完整匹配)`);
-      } else if (uploadedIndex.has(keyWithoutVersion)) {
-        uploadedFilename = uploadedIndex.get(keyWithoutVersion)!;
-        console.log(`     ✓ 已上传: ${uploadedFilename} (软件名+架构匹配)`);
+        console.log(`     ✓ 已上传: ${uploadedFilename}`);
       }
 
       if (uploadedFilename) {
