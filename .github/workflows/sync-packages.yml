@@ -60,7 +60,7 @@ jobs:
           ls -lh config/
 
       - name: 保存 config 到 Cache
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: config/
           key: config-state-${{ github.run_number }}
@@ -93,7 +93,7 @@ jobs:
           mkdir -p config
 
       - name: 恢复 config 缓存
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: config/
           key: config-state-${{ github.run_number }}
