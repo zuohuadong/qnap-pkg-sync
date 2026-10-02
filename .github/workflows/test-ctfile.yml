@@ -1,0 +1,32 @@
+name: CTFile regression tests
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - src/ctfile.ts
+      - scripts/postgresql18.mjs
+      - tests/ctfile-upload.test.ts
+      - tests/postgresql18.test.mjs
+      - .github/workflows/test-ctfile.yml
+  pull_request:
+    paths:
+      - src/ctfile.ts
+      - scripts/postgresql18.mjs
+      - tests/ctfile-upload.test.ts
+      - tests/postgresql18.test.mjs
+      - .github/workflows/test-ctfile.yml
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: PostgreSQL 18 selection and link safety
+        run: node --test tests/postgresql18.test.mjs
+      - name: Multipart uploads and deadline cleanup
+        run: bun test tests/ctfile-upload.test.ts
