@@ -1,0 +1,31 @@
+name: Purchase sync runtime regressions
+on:
+  push:
+    branches: [main, feat/automatic-purchase-sync]
+    paths:
+      - package.json
+      - bun.lock
+      - scripts/purchase-sync-core.mjs
+      - scripts/sync-purchases.mjs
+      - tests/purchase-sync*.test.mjs
+      - .github/workflows/test-purchase-runtime.yml
+  pull_request:
+    paths:
+      - package.json
+      - bun.lock
+      - scripts/purchase-sync-core.mjs
+      - scripts/sync-purchases.mjs
+      - tests/purchase-sync*.test.mjs
+      - .github/workflows/test-purchase-runtime.yml
+permissions:
+  contents: read
+jobs:
+  bun-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Exercise the production Bun runtime without credentials
+        run: bun test tests/purchase-sync*.test.mjs tests/postgresql18.test.mjs tests/ctfile-upload.test.ts tests/concurrency.test.ts
