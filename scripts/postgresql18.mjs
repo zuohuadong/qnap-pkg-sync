@@ -26,7 +26,8 @@ export function selectPostgresql18(config) {
     for (const platform of platforms) {
       if (!platform.platformID || typeof platform.location !== 'string') throw new Error('Platform metadata is incomplete');
       const filename = packageFilename(platform.location);
-      const identity = JSON.stringify([String(app.version), platform.platformID, platform.location, platform.signature]);
+      // QNAP model IDs are compatibility aliases, not unique binary identities.
+      const identity = JSON.stringify([String(app.version), platform.location, platform.signature]);
       if (filenames.has(filename) && filenames.get(filename) !== identity) throw new Error(`Conflicting package filename: ${filename}`);
       filenames.set(filename, identity);
     }
@@ -75,7 +76,7 @@ async function main() {
     import('../src/env.ts'), import('../src/fetch-xml.ts'), import('../src/download-apps.ts'),
     import('../src/ctfile.ts'), import('../src/ctfile-utils.ts'),
   ]);
-  await loadEnv();
+  if (await Bun.file('.env').exists()) await loadEnv();
   const originalCwd = process.cwd();
   const reportDir = resolve(originalCwd, 'reports/postgresql18');
   await mkdir(reportDir, { recursive: true });
