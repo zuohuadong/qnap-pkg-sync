@@ -11,3 +11,7 @@ config/
 
 # 加密脚本和加密文件
 scripts/encrypt-config.sh
+
+# Verified receipts and generated reports stay out of the source repository.
+.sync-state/
+reports/

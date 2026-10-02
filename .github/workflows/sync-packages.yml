@@ -1,321 +1,159 @@
 name: Sync QNAP Packages
 
 on:
-  # 定时任务：每天 UTC 23:00 (北京时间 7:00) 运行
+  # Daily UTC 23:17 = Beijing 07:17 / Tokyo 08:17 the next day.
+  # Changing the cron also reactivates schedules disabled for repository inactivity.
   schedule:
-    - cron: '0 23 * * *'
-
-  # 手动触发
+    - cron: '17 23 * * *'
   workflow_dispatch:
     inputs:
-      decrypt_config:
-        description: '解密 config.tar.gz.enc 到 config 目录并保存到 Cache'
-        required: false
+      product:
+        description: 'Exact product/internal name; empty means every purchased product'
+        type: string
+        default: ''
+      dry_run:
+        description: 'Inspect remote inventory and links without downloading or uploading'
         type: boolean
         default: false
-      force_sync:
-        description: '强制同步：检查 apps.json 与 CTFile 的差异，将缺失的软件包添加到 update-apps.json'
-        required: false
+  workflow_call:
+    inputs:
+      product:
+        type: string
+        default: ''
+      dry_run:
         type: boolean
         default: false
+  push:
+    branches: [main, feat/automatic-purchase-sync]
+    paths:
+      - scripts/purchase-sync-core.mjs
+      - scripts/sync-purchases.mjs
+      - tests/purchase-sync.test.mjs
+      - .github/workflows/sync-packages.yml
+  pull_request:
+    paths:
+      - scripts/purchase-sync-core.mjs
+      - scripts/sync-purchases.mjs
+      - tests/purchase-sync.test.mjs
+      - .github/workflows/sync-packages.yml
 
-# 取消正在运行的旧工作流
+permissions:
+  contents: read
+  actions: read
+
+# Share the lock with manual PostgreSQL runs; never interrupt an in-flight upload.
 concurrency:
   group: sync-packages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  # 任务1：解密配置文件并保存到 Cache
-  decrypt-config:
-    name: 解密配置文件
+  tests:
     runs-on: ubuntu-latest
-    if: ${{ inputs.decrypt_config }}
-
+    timeout-minutes: 10
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-
-      - name: 解密配置文件
-        env:
-          ENCRYPTION_PASSWORD: ${{ secrets.ENCRYPTION_PASSWORD }}
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: New reconciliation and existing regression tests
         run: |
-          echo "🔓 解密配置文件..."
+          node --test tests/purchase-sync.test.mjs tests/postgresql18.test.mjs
+          bun test tests/ctfile-upload.test.ts tests/concurrency.test.ts
 
-          if [ ! -f "config.tar.gz.enc" ]; then
-            echo "❌ Error: config.tar.gz.enc not found"
-            exit 1
-          fi
-
-          openssl enc -aes-256-cbc -d -pbkdf2 \
-            -in config.tar.gz.enc \
-            -out config.tar.gz \
-            -pass env:ENCRYPTION_PASSWORD
-
-          tar -xzf config.tar.gz
-          rm config.tar.gz
-
-          echo "✅ Config files restored:"
-          ls -lh config/
-
-      - name: 保存 config 到 Cache
+  sync:
+    needs: tests
+    if: github.event_name != 'pull_request' && github.repository == 'zuohuadong/qnap-pkg-sync'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      # Feature-branch runs are always read-only, even if a caller requests uploads.
+      SYNC_DRY_RUN: ${{ (github.ref != 'refs/heads/main' || inputs.dry_run == true) && 'true' || 'false' }}
+      SYNC_PRODUCT: ${{ inputs.product || '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Read workflow activation state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/sync-packages.yml" --jq '{name, state}'
+      - name: Restore verified receipts (optimization only, never the work queue)
+        uses: actions/cache/restore@v6
+        with:
+          path: .sync-state/receipts.json
+          key: purchase-receipts-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: purchase-receipts-v1-
+      - name: Apply supported network tuning
+        run: |
+          sudo sysctl -w net.core.default_qdisc=fq || true
+          sudo sysctl -w net.ipv4.tcp_congestion_control=bbr || true
+      - name: Reconcile complete purchases with CTFile
+        env:
+          QNAP_DOWNLOAD_URL: ${{ secrets.QNAP_DOWNLOAD_URL }}
+          QNAP_USERNAME: ${{ secrets.QNAP_USERNAME }}
+          QNAP_PASSWORD: ${{ secrets.QNAP_PASSWORD }}
+          CTFILE_SESSION: ${{ secrets.CTFILE_SESSION }}
+          CTFILE_FOLDER_ID: ${{ secrets.CTFILE_FOLDER_ID }}
+          WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
+          WEBDAV_USERNAME: ${{ secrets.WEBDAV_USERNAME }}
+          WEBDAV_PASSWORD: ${{ secrets.WEBDAV_PASSWORD }}
+          WEBDAV_ROOT_PATH: /qnaporg-github
+        run: bun run sync
+      - name: Save receipts even after partial failure
+        if: always() && env.SYNC_DRY_RUN != 'true'
         uses: actions/cache/save@v6
         with:
-          path: config/
-          key: config-state-${{ github.run_number }}
-
-  # 任务2：同步软件包
-  sync:
-    name: 同步 QNAP 软件包
-    runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 小时超时
-    needs: [decrypt-config]
-    if: always() && (needs.decrypt-config.result == 'success' || needs.decrypt-config.result == 'skipped')
-
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-
-      - name: 设置 Bun 环境
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: 安装依赖
-        run: bun install --frozen-lockfile
-
-      - name: 创建必要的目录
-        run: |
-          mkdir -p downloads
-          mkdir -p config
-
-      - name: 恢复 config 缓存
-        uses: actions/cache@v6
-        with:
-          path: config/
-          key: config-state-${{ github.run_number }}
-          restore-keys: |
-            config-state-
-
-      - name: 检查配置文件状态
-        run: |
-          echo "📋 当前配置文件："
-          ls -lh config/ || echo "  config 目录为空"
-          echo ""
-
-          if [ -f config/upload-progress.json ]; then
-            echo "✓ 找到上传进度缓存"
-            uploaded_count=$(jq '. | length' config/upload-progress.json)
-            echo "  已上传: $uploaded_count 个文件"
-          else
-            echo "ℹ️  未找到上传进度缓存（首次运行或缓存过期）"
-          fi
-
-          if [ -f config/apps.json ]; then
-            echo "✓ 找到软件包列表缓存"
-            apps_count=$(jq '.plugins.item | length' config/apps.json)
-            echo "  软件包总数: $apps_count"
-          fi
-
-          if [ -f config/metadata.json ]; then
-            echo "✓ 找到元数据缓存"
-            metadata_count=$(jq '. | length' config/metadata.json)
-            echo "  已下载: $metadata_count 个文件"
-          fi
-
-      - name: 启用 BBR 加速
-        run: |
-          echo "正在启用 BBR TCP 拥塞控制算法..."
-
-          # 检查当前内核版本
-          kernel_version=$(uname -r)
-          echo "当前内核版本: $kernel_version"
-
-          # 检查 BBR 模块是否可用
-          if [ -f /proc/sys/net/ipv4/tcp_available_congestion_control ]; then
-            echo "可用的拥塞控制算法:"
-            cat /proc/sys/net/ipv4/tcp_available_congestion_control
-          fi
-
-          # 启用 BBR
-          sudo sysctl -w net.core.default_qdisc=fq
-          sudo sysctl -w net.ipv4.tcp_congestion_control=bbr
-
-          # 验证配置
-          echo ""
-          echo "✓ BBR 配置完成"
-          echo "  队列调度算法: $(cat /proc/sys/net/core/default_qdisc)"
-          echo "  拥塞控制算法: $(cat /proc/sys/net/ipv4/tcp_congestion_control)"
-
-          # 额外的网络优化参数
-          sudo sysctl -w net.ipv4.tcp_notsent_lowat=16384
-          sudo sysctl -w net.ipv4.tcp_slow_start_after_idle=0
-
-          echo "✓ 网络优化参数已应用"
-
-      - name: 配置环境变量
-        run: |
-          cat > .env << EOF
-          # QNAP 下载源配置
-          QNAP_DOWNLOAD_URL=${{ secrets.QNAP_DOWNLOAD_URL }}
-          QNAP_USERNAME=${{ secrets.QNAP_USERNAME }}
-          QNAP_PASSWORD=${{ secrets.QNAP_PASSWORD }}
-
-          # CTFile 配置
-          CTFILE_SESSION=${{ secrets.CTFILE_SESSION }}
-          CTFILE_FOLDER_ID=${{ secrets.CTFILE_FOLDER_ID }}
-          CTFILE_USER=${{ secrets.CTFILE_USER }}
-          CTFILE_PASSWORD=${{ secrets.CTFILE_PASSWORD }}
-
-          # WebDAV 配置 (可选，作为上传失败的备用方案)
-          WEBDAV_URL=${{ secrets.WEBDAV_URL }}
-          WEBDAV_USERNAME=${{ secrets.WEBDAV_USERNAME }}
-          WEBDAV_PASSWORD=${{ secrets.WEBDAV_PASSWORD }}
-          WEBDAV_ROOT_PATH=/qnaporg-github
-
-          # 上传配置
-          UPLOAD_CONCURRENCY=1
-          MAX_UPLOAD_FILE_SIZE=1073741824
-          EOF
-
-          echo "✓ 环境变量配置完成"
-
-      - name: 1. 获取最新软件包列表 (fetch)
-        run: |
-          echo "📥 步骤 1: 获取最新的 QNAP 软件包列表..."
-          bun run fetch
-
-          if [ -f config/apps.json ]; then
-            total_count=$(jq '.plugins.item | length' config/apps.json)
-            echo "✓ 软件包总数: $total_count"
-          fi
-
-      - name: 2. 检查上传状态 (check-upload)
-        run: |
-          echo "🔍 步骤 2: 检查上传状态..."
-          bun run check-upload
-
-      - name: 2.5. 强制同步模式 - 检查缺失文件 (check-missing)
-        if: ${{ inputs.force_sync }}
-        run: |
-          echo "🔄 步骤 2.5: 强制同步 - 检查 CTFile 中缺失的文件..."
-          bun run check-missing
-
-          echo ""
-          echo "📊 检查结果："
-          if [ -f config/update-apps.json ]; then
-            missing_count=$(jq '.plugins.item | length' config/update-apps.json)
-            echo "  缺失的软件包: $missing_count"
-
-            if [ "$missing_count" -gt 0 ]; then
-              echo ""
-              echo "📋 需要下载的软件包:"
-              jq -r '.plugins.item[] | "  - \(.name) v\(.version) (\(.platform | length) 个平台)"' config/update-apps.json
-            fi
-          else
-            echo "  ⚠️  未生成 update-apps.json"
-          fi
-
-      - name: 3. 检查 CTFile 已存在文件 (check-existing)
-        run: |
-          echo "🔍 步骤 3: 检查 CTFile 中已存在的文件..."
-          bun run check-existing
-
-      - name: 4. 下载更新的软件包 (update)
-        run: |
-          echo "⬇️ 步骤 4: 下载更新的软件包..."
-          bun run update
-
-          echo ""
-          echo "📊 本次下载统计："
-          if ls downloads/*.qpkg 1> /dev/null 2>&1; then
-            count=$(ls downloads/*.qpkg | wc -l)
-            echo "  ✅ 成功下载: $count 个软件包"
-            echo ""
-            echo "📦 文件列表："
-            ls -lh downloads/*.qpkg | awk '{print "  - " $9 " (" $5 ")"}'
-          else
-            echo "  ℹ️  无新软件包需要下载（所有更新已同步）"
-          fi
-
-      - name: 5. 上传到 CTFile (upload)
-        run: |
-          echo "⬆️ 步骤 5: 上传到 CTFile..."
-
-          # 检查是否有文件需要上传
-          if ! ls downloads/*.qpkg 1> /dev/null 2>&1; then
-            echo "⚠ 没有文件需要上传"
-          else
-            bun run upload
-          fi
-
-          echo ""
-          echo "📊 上传结果："
-          if [ -f config/metadata-uploaded.json ]; then
-            echo "  上传元数据: ✓"
-
-            # 统计上传成功的文件
-            success=$(jq '[.[] | select(.ctfileUrl != null)] | length' config/metadata-uploaded.json)
-            total=$(jq '. | length' config/metadata-uploaded.json)
-            echo "  成功: $success/$total"
-          fi
-
-      - name: 生成工作流摘要
+          path: .sync-state/receipts.json
+          key: purchase-receipts-v1-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Save verified links and pending failures only
         if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: purchased-packages-ctfile-links
+          path: |
+            reports/purchases/report.json
+            reports/purchases/links.md
+          if-no-files-found: warn
+          retention-days: 30
+
+  notify:
+    needs: [tests, sync]
+    if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && inputs.dry_run != true && (inputs.product == '' || inputs.product == null)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Maintain one failure issue and close it after recovery
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SYNC_RESULT: ${{ needs.sync.result }}
+          TEST_RESULT: ${{ needs.tests.result }}
         run: |
-          echo "## 📦 QNAP 软件包同步摘要" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # 检查是否有实际的下载操作（基于 update-apps.json 或下载的文件）
-          has_downloads=false
-          if [ -f config/update-apps.json ] && [ -s config/update-apps.json ]; then
-            update_count=$(jq '. | length' config/update-apps.json)
-            if [ "$update_count" -gt 0 ]; then
-              has_downloads=true
-            fi
-          fi
-
-          # 如果有下载操作，显示本次下载统计
-          if [ "$has_downloads" = true ] && [ -f config/metadata.json ]; then
-            total=$(jq '. | length' config/metadata.json)
-            echo "### 下载统计" >> $GITHUB_STEP_SUMMARY
-            echo "- 总文件数: $total" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-
-            echo "### 产品列表" >> $GITHUB_STEP_SUMMARY
-            jq -r '.[] | "- **\(.productName)** \(.version) (\(.architecture))"' config/metadata.json | sort -u >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          elif [ "$has_downloads" = false ]; then
-            echo "### 本次运行状态" >> $GITHUB_STEP_SUMMARY
-            echo "ℹ️  没有发现新的或更新的软件包，无需下载" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          # 检查是否有实际的上传操作
-          has_uploads=false
-          if ls downloads/*.qpkg 1> /dev/null 2>&1; then
-            has_uploads=true
-          fi
-
-          # 如果有上传操作，显示上传统计
-          if [ "$has_uploads" = true ] && [ -f config/metadata-uploaded.json ]; then
-            success=$(jq '[.[] | select(.ctfileUrl != null)] | length' config/metadata-uploaded.json)
-            failed=$(jq '[.[] | select(.ctfileUrl == null)] | length' config/metadata-uploaded.json)
-
-            echo "### 上传统计" >> $GITHUB_STEP_SUMMARY
-            echo "- ✅ 成功: $success" >> $GITHUB_STEP_SUMMARY
-            echo "- ❌ 失败: $failed" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-
-            if [ $failed -gt 0 ]; then
-              echo "### 失败的文件" >> $GITHUB_STEP_SUMMARY
-              jq -r '.[] | select(.ctfileUrl == null) | "- \(.filename): \(.uploadError // "未知错误")"' config/metadata-uploaded.json >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-            fi
-          fi
-
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "🕐 完成时间: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          node --input-type=module <<'NODE'
+          const env = process.env;
+          const base = `https://api.github.com/repos/${env.GITHUB_REPOSITORY}`;
+          const title = '[QNAP sync] 自动同步失败';
+          const run = `https://github.com/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}`;
+          async function api(path, method = 'GET', data) {
+            const response = await fetch(base + path, { method, signal: AbortSignal.timeout(30000),
+              headers: { Authorization: `Bearer ${env.GH_TOKEN}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+              ...(data ? { body: JSON.stringify(data) } : {}) });
+            if (!response.ok) throw new Error(`Notification API HTTP ${response.status}`);
+            return response.json();
+          }
+          let issue;
+          for (let page = 1; page <= 10; page++) {
+            const rows = await api(`/issues?state=open&per_page=100&page=${page}`);
+            issue = rows.find(x => !x.pull_request && x.title === title && x.user?.login === 'github-actions[bot]');
+            if (issue || rows.length < 100) break;
+          }
+          const success = env.SYNC_RESULT === 'success' && env.TEST_RESULT === 'success';
+          if (success) {
+            if (issue) await api(`/issues/${issue.number}`, 'PATCH', { state: 'closed', body: `完整同步已恢复：[运行记录](${run})。` });
+          } else {
+            const body = `自动同步未全部完成。测试：${env.TEST_RESULT}；同步：${env.SYNC_RESULT}。\n\n[查看运行记录与待重试清单](${run})。\n\n下次任务会重新核对完整购买源和 CTFile；已验证文件不会重复上传。凭据失效需要更新仓库 Secrets。`;
+            await api(issue ? `/issues/${issue.number}` : '/issues', issue ? 'PATCH' : 'POST', { title, body });
+          }
+          NODE
