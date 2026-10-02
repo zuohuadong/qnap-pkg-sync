@@ -6,7 +6,7 @@
   "scripts": {
     "sync": "bun run scripts/sync-purchases.mjs",
     "sync:audit": "SYNC_DRY_RUN=true bun run scripts/sync-purchases.mjs",
-    "test:sync": "node --test tests/purchase-sync.test.mjs",
+    "test:sync": "node --test tests/purchase-sync*.test.mjs",
     "fetch": "bun run src/fetch-xml.ts",
     "check-existing": "bun run src/check-existing-files.ts",
     "check-upload": "bun run src/check-upload.ts",

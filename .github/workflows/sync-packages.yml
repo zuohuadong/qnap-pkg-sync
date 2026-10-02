@@ -28,23 +28,18 @@ on:
     paths:
       - scripts/purchase-sync-core.mjs
       - scripts/sync-purchases.mjs
-      - tests/purchase-sync.test.mjs
+      - tests/purchase-sync*.test.mjs
       - .github/workflows/sync-packages.yml
   pull_request:
     paths:
       - scripts/purchase-sync-core.mjs
       - scripts/sync-purchases.mjs
-      - tests/purchase-sync.test.mjs
+      - tests/purchase-sync*.test.mjs
       - .github/workflows/sync-packages.yml
 
 permissions:
   contents: read
   actions: read
-
-# Share the lock with manual PostgreSQL runs; never interrupt an in-flight upload.
-concurrency:
-  group: sync-packages
-  cancel-in-progress: false
 
 jobs:
   tests:
@@ -56,11 +51,15 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: New reconciliation and existing regression tests
         run: |
-          node --test tests/purchase-sync.test.mjs tests/postgresql18.test.mjs
+          node --test tests/purchase-sync*.test.mjs tests/postgresql18.test.mjs
           bun test tests/ctfile-upload.test.ts tests/concurrency.test.ts
 
   sync:
     needs: tests
+    # Only writers share this lock. PR tests must not replace pending sync runs.
+    concurrency:
+      group: sync-packages
+      cancel-in-progress: false
     if: github.event_name != 'pull_request' && github.repository == 'zuohuadong/qnap-pkg-sync'
     runs-on: ubuntu-latest
     timeout-minutes: 360

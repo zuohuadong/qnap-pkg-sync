@@ -120,20 +120,60 @@ export async function curlTransfer(url, local, { webdav, timeoutSeconds = 1200 }
   } finally { clearTimeout(timer); }
 }
 
-export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer } = {}) {
+/** One serialized API lane, with bounded Retry-After-aware recovery for reads. */
+export function rateLimitedFetch(fetchImpl = fetch, { intervalMs = 1500, retries = 4,
+  pause = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now } = {}) {
+  let next = 0, tail = Promise.resolve();
+  return async (url, options, retryable = true) => {
+    const target = httpsUrl(url, true);
+    if (!['rest.ctfile.com', 'webapi.ctfile.com'].includes(target.hostname)) fail('UNSUPPORTED_CTFILE_API_HOST');
+    const readEndpoint = target.pathname === '/getfile.php' || /^\/v1\/public\/(file|folder)\/list$/.test(target.pathname);
+    retryable = retryable && readEndpoint;
+    const previous = tail;
+    let release;
+    tail = new Promise(resolve => { release = resolve; });
+    await previous;
+    try {
+      for (let attempt = 0; ; attempt++) {
+        await pause(Math.max(0, next - now()));
+        next = now() + intervalMs;
+        let response;
+        try {
+          response = await fetchImpl(url, { ...options, signal: AbortSignal.timeout(60000) });
+        } catch (error) {
+          if (!retryable || attempt >= retries) throw new SyncError('CTFILE_NETWORK_FAILED');
+          await pause(Math.min(30000, 2000 * 2 ** attempt));
+          continue;
+        }
+        if (![429, 500, 502, 503, 504].includes(response.status) || !retryable || attempt >= retries) return response;
+        const value = response.headers.get('retry-after');
+        const requested = value && /^\d+$/.test(value) ? Number(value) * 1000 : value ? Date.parse(value) - now() : NaN;
+        await response.body?.cancel();
+        if (requested > 300000) fail('CTFILE_RETRY_DEFERRED');
+        const delay = Math.max(intervalMs, Number.isFinite(requested) ? requested : response.status === 429 ? 30000 * (attempt + 1) : 2000 * 2 ** attempt);
+        console.log(`CTFILE_API_RETRY status=${response.status} attempt=${attempt + 1}`);
+        await pause(delay);
+      }
+    } finally { release(); }
+  };
+}
+
+export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer, requestIntervalMs = 1500 } = {}) {
+  const apiFetch = rateLimitedFetch(fetchImpl, { intervalMs: requestIntervalMs });
   const session = required(env, 'CTFILE_SESSION');
   const rootId = folderId(required(env, 'CTFILE_FOLDER_ID'));
   const products = new Map();
   let root;
   async function request(endpoint, body) {
-    return jsonResponse(await fetchImpl(`https://rest.ctfile.com/v1/public/${endpoint}`, {
+    return jsonResponse(await apiFetch(`https://rest.ctfile.com/v1/public/${endpoint}`, {
       method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...body, session }), signal: AbortSignal.timeout(60000),
-    }));
+    }, endpoint.endsWith('/list')));
   }
   const list = (id, kind) => listAllPages((page, page_size) => request(`${kind}/list`, { folder_id: folderKey(id), page, page_size }));
   function uniqueFolder(rows, name) {
-    const matches = rows.filter(r => isFolder(r) && remoteName(r) === name);
+    const exact = rows.filter(r => isFolder(r) && remoteName(r) === name);
+    const matches = exact.length ? exact : rows.filter(r => isFolder(r) && remoteName(r).toLowerCase() === name.toLowerCase());
     if (matches.length > 1) fail('AMBIGUOUS_PRODUCT_FOLDER');
     return matches[0];
   }
@@ -208,7 +248,7 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer 
       api.searchParams.set('path', share.pathname.split('/')[1]);
       api.searchParams.set('f', share.pathname.split('/')[2]);
       api.searchParams.set('passcode', share.searchParams.get('p') || '');
-      return jsonResponse(await fetchImpl(api, { headers: { Referer: link }, redirect: 'error', signal: AbortSignal.timeout(30000) }));
+      return jsonResponse(await apiFetch(api, { headers: { Referer: link }, redirect: 'error', signal: AbortSignal.timeout(30000) }));
     },
   };
 }
@@ -220,6 +260,7 @@ export async function main(env = process.env) {
   const save = async (report, receipts) => {
     await atomicJson(join(reportDir, 'report.json'), report);
     await writeFile(join(reportDir, 'links.md'), markdownReport(report));
+    console.log(`PURCHASE_SYNC_PROGRESS verified=${report.verified.length} pending=${report.pending.length}`);
     if (report.mode === 'sync') await atomicJson(statePath, receipts);
   };
   let report;
