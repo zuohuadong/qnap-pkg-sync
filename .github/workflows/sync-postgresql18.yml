@@ -1,71 +1,21 @@
 name: Sync PostgreSQL 18
-
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - scripts/postgresql18.mjs
-      - src/ctfile.ts
-      - src/ctfile-curl.ts
-      - src/utils/concurrency.ts
-      - tests/postgresql18.test.mjs
-      - tests/ctfile-upload.test.ts
-      - tests/concurrency.test.ts
-      - .github/workflows/sync-postgresql18.yml
-  schedule:
-    - cron: '15 0 * * *'
-
+    inputs:
+      dry_run:
+        description: 'Inspect only; do not download or upload'
+        type: boolean
+        default: false
 permissions:
   contents: read
-
-concurrency:
-  group: sync-packages
-  cancel-in-progress: false
-
+  actions: read
+  issues: write
+# PostgreSQL is included in the daily all-purchases task. Keep this manual entry
+# for compatibility, delegating to the same implementation and concurrency lock.
 jobs:
   sync:
-    name: Verify and sync PostgreSQL 18
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-      - name: Test package selection, uploads and complete download queues
-        run: |
-          node --test tests/postgresql18.test.mjs
-          bun test tests/ctfile-upload.test.ts tests/concurrency.test.ts
-      - name: Apply existing upload network tuning
-        run: |
-          sudo sysctl -w net.core.default_qdisc=fq || true
-          sudo sysctl -w net.ipv4.tcp_congestion_control=bbr || true
-          sudo sysctl -w net.ipv4.tcp_notsent_lowat=16384 || true
-          sudo sysctl -w net.ipv4.tcp_slow_start_after_idle=0 || true
-          curl --version | head -1
-      - name: Synchronize purchased PostgreSQL 18 packages
-        timeout-minutes: 75
-        env:
-          QNAP_DOWNLOAD_URL: ${{ secrets.QNAP_DOWNLOAD_URL }}
-          QNAP_USERNAME: ${{ secrets.QNAP_USERNAME }}
-          QNAP_PASSWORD: ${{ secrets.QNAP_PASSWORD }}
-          CTFILE_SESSION: ${{ secrets.CTFILE_SESSION }}
-          CTFILE_FOLDER_ID: ${{ secrets.CTFILE_FOLDER_ID }}
-          CTFILE_UPLOAD_TRANSPORT: curl
-          DOWNLOAD_CONCURRENCY: '2'
-        run: |
-          touch .env
-          bun run scripts/postgresql18.mjs
-      - name: Save verified CTFile links only
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: postgresql18-ctfile-links
-          path: reports/postgresql18/links.*
-          if-no-files-found: warn
-          retention-days: 7
+    uses: ./.github/workflows/sync-packages.yml
+    with:
+      product: PostgreSQL 18
+      dry_run: ${{ inputs.dry_run }}
+    secrets: inherit
