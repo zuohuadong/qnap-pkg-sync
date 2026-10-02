@@ -37,3 +37,16 @@ test('legacy product folder capitalization is reused only when unambiguous', asy
   const adapter = createAdapter({ CTFILE_SESSION: 'secret', CTFILE_FOLDER_ID: '1' }, options);
   assert.equal((await adapter.inventory({ folder: 'Openlist' })).length, 1);
 });
+
+test('long Retry-After defers work instead of retrying earlier than requested', async () => {
+  let calls = 0;
+  const request = rateLimitedFetch(async () => { calls++; return new Response('', { status: 429, headers: { 'retry-after': '3600' } }); }, { intervalMs: 0, pause: async () => {} });
+  await assert.rejects(request('https://rest.ctfile.com/v1/public/file/list', {}), /RETRY_DEFERRED/);
+  assert.equal(calls, 1);
+});
+test('retry transport cannot send requests to unrelated hosts', async () => {
+  let calls = 0;
+  const request = rateLimitedFetch(async () => { calls++; return Response.json({}); });
+  await assert.rejects(request('https://unrelated.example/collect', {}), /UNSAFE_URL/);
+  assert.equal(calls, 0);
+});
