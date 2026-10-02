@@ -51,8 +51,13 @@ test('rejects missing version and platform metadata', () => {
   }
 });
 
-test('rejects conflicting filenames across architectures', () => {
-  assert.throws(() => selectPostgresql18(config(app({ platform: [platform(), { ...platform(), platformID: 'arm_64' }] }))), /Conflicting package filename/);
+test('rejects conflicting content signatures for one filename', () => {
+  assert.throws(() => selectPostgresql18(config(app({ platform: [platform(), { ...platform(), signature: 'different-content' }] }))), /Conflicting package filename/);
+});
+
+test('accepts multiple QNAP model IDs sharing the exact same binary', () => {
+  const result = selectPostgresql18(config(app({ platform: [platform('arm_64'), { ...platform('arm_64'), platformID: 'TS-NASARM_64-alias' }] })));
+  assert.equal(result.plugins.item[0].platform.length, 2);
 });
 
 test('extracts the QPKG filename without signed URL parameters', () => {
