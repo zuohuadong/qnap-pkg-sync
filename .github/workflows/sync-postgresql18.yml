@@ -8,8 +8,10 @@ on:
       - scripts/postgresql18.mjs
       - src/ctfile.ts
       - src/ctfile-curl.ts
+      - src/utils/concurrency.ts
       - tests/postgresql18.test.mjs
       - tests/ctfile-upload.test.ts
+      - tests/concurrency.test.ts
       - .github/workflows/sync-postgresql18.yml
   schedule:
     - cron: '15 0 * * *'
@@ -19,7 +21,7 @@ permissions:
 
 concurrency:
   group: sync-packages
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  cancel-in-progress: false
 
 jobs:
   sync:
@@ -35,13 +37,12 @@ jobs:
           bun-version: latest
       - name: Install dependencies
         run: bun install --frozen-lockfile
-      - name: Test package selection, links and upload failures
+      - name: Test package selection, uploads and complete download queues
         run: |
           node --test tests/postgresql18.test.mjs
-          bun test tests/ctfile-upload.test.ts
+          bun test tests/ctfile-upload.test.ts tests/concurrency.test.ts
       - name: Apply existing upload network tuning
         run: |
-          # Match the general synchronizer's BBR configuration where supported.
           sudo sysctl -w net.core.default_qdisc=fq || true
           sudo sysctl -w net.ipv4.tcp_congestion_control=bbr || true
           sudo sysctl -w net.ipv4.tcp_notsent_lowat=16384 || true
