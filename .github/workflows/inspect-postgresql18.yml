@@ -1,0 +1,79 @@
+name: Inspect PostgreSQL 18 on CTFile
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/inspect-postgresql18.yml
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Read purchased package metadata and remote file links
+        env:
+          QNAP_DOWNLOAD_URL: ${{ secrets.QNAP_DOWNLOAD_URL }}
+          QNAP_USERNAME: ${{ secrets.QNAP_USERNAME }}
+          QNAP_PASSWORD: ${{ secrets.QNAP_PASSWORD }}
+          CTFILE_SESSION: ${{ secrets.CTFILE_SESSION }}
+          CTFILE_FOLDER_ID: ${{ secrets.CTFILE_FOLDER_ID }}
+        run: |
+          bun run - <<'BUN'
+          import { fetchXml, xmlToJson } from './src/fetch-xml.ts';
+          import { selectPostgresql18, packageFilename } from './scripts/postgresql18.mjs';
+          import { getProductFolderName } from './src/ctfile-utils.ts';
+          const env = process.env;
+          const config = selectPostgresql18(await xmlToJson(await fetchXml({ url: env.QNAP_DOWNLOAD_URL, username: env.QNAP_USERNAME, password: env.QNAP_PASSWORD })));
+          const keyOf = x => String(x.key || x.id || x.folder_id || x.file_id || '');
+          const isFolder = x => x.icon === 'folder' || keyOf(x).startsWith('d');
+          async function list(id) {
+            const result = [];
+            const seen = new Set();
+            for (let page = 1; page <= 100; page++) {
+              const response = await fetch('https://rest.ctfile.com/v1/public/folder/list', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session: env.CTFILE_SESSION, folder_id: id === '0' ? '0' : `d${String(id).replace(/^d/, '')}`, page, page_size: 100 }),
+                signal: AbortSignal.timeout(60000),
+              });
+              const data = await response.json();
+              if (!response.ok || String(data.code) !== '200') throw new Error(`CTFile HTTP ${response.status}, code ${data.code}`);
+              const rows = data.results ?? data.data;
+              if (!Array.isArray(rows)) throw new Error('Unexpected CTFile response');
+              for (const row of rows) {
+                const key = keyOf(row);
+                if (seen.has(key)) throw new Error('Repeated CTFile page');
+                seen.add(key);
+                result.push(row);
+              }
+              if (rows.length < 100) return result;
+            }
+            throw new Error('Too many CTFile pages');
+          }
+          function safeRow(row) {
+            const allowed = ['key', 'id', 'name', 'file_name', 'folder_name', 'icon', 'size', 'file_size', 'url', 'download_url', 'short_url', 'share_url', 'file_url', 'folder_url', 'link'];
+            return Object.fromEntries(allowed.filter(key => row[key] !== undefined).map(key => [key, row[key]]));
+          }
+          const root = await list(env.CTFILE_FOLDER_ID);
+          for (const app of config.plugins.item) {
+            const expected = [...new Set(app.platform.map(p => packageFilename(p.location)))];
+            console.log('EXPECTED_PACKAGES ' + JSON.stringify({ name: app.name, version: app.version, filenames: expected }));
+            const folder = root.find(x => isFolder(x) && (x.name || x.folder_name) === getProductFolderName(app.name));
+            if (!folder) { console.log('PRODUCT_FOLDER_NOT_CREATED'); continue; }
+            console.log('PRODUCT_FOLDER ' + JSON.stringify(safeRow(folder)));
+            const entries = await list(keyOf(folder));
+            for (const file of entries.filter(x => !isFolder(x) && expected.includes(x.name || x.file_name))) console.log('REMOTE_PACKAGE ' + JSON.stringify(safeRow(file)));
+            for (const child of entries.filter(isFolder)) {
+              console.log('MONTH_FOLDER ' + JSON.stringify(safeRow(child)));
+              const files = await list(keyOf(child));
+              for (const file of files.filter(x => !isFolder(x) && expected.includes(x.name || x.file_name))) {
+                console.log('REMOTE_PACKAGE_FIELDS ' + JSON.stringify(Object.keys(file)));
+                console.log('REMOTE_PACKAGE ' + JSON.stringify(safeRow(file)));
+              }
+            }
+          }
+          BUN
