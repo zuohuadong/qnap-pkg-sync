@@ -47,21 +47,33 @@ export function ctfileLink(value) {
   } catch { return undefined; }
 }
 
+export function remoteShareLink(remote) {
+  // `weblink` is CTFile's canonical share field. Prefer it to temporary downloads.
+  const link = [remote?.weblink, remote?.share_url, remote?.url, remote?.short_url, remote?.download_url].map(ctfileLink).find(Boolean);
+  if (!link) return undefined;
+  const url = new URL(link);
+  if (remote.default_passcode && !url.searchParams.has('p')) url.searchParams.set('p', String(remote.default_passcode));
+  return url.href;
+}
+
 export function verifiedEntry(expected, remote, folderUrl) {
   const filename = remote?.name || remote?.file_name;
   if (filename !== expected.filename || remote.icon === 'folder') throw new Error(`Remote file was not confirmed: ${expected.filename}`);
   const fileId = String(remote.key || remote.file_id || remote.id || '');
   if (!fileId || fileId.startsWith('d')) throw new Error(`Remote file has no valid ID: ${expected.filename}`);
-  const downloadUrl = [remote.download_url, remote.url, remote.short_url, remote.share_url].map(ctfileLink).find(Boolean);
+  if (expected.fileId && fileId.replace(/^f/, '') !== String(expected.fileId).replace(/^f/, '')) throw new Error(`Remote file ID does not match upload receipt: ${expected.filename}`);
+  const numericSize = [remote.file_size, remote.filesize, remote.size].find(value => typeof value === 'number' || (typeof value === 'string' && /^\d+$/.test(value)));
+  if (numericSize !== undefined && expected.fileSize !== undefined && Number(numericSize) !== expected.fileSize) throw new Error(`Remote file size does not match: ${expected.filename}`);
+  const downloadUrl = remoteShareLink(remote);
   const directoryUrl = ctfileLink(folderUrl);
-  if (!downloadUrl && !directoryUrl) throw new Error(`No CTFile link available: ${expected.filename}`);
+  if (!downloadUrl && !directoryUrl) throw new Error(`No canonical CTFile link available: ${expected.filename}`);
   return {
     productName: expected.productName,
     version: expected.version,
     architecture: expected.architecture,
     filename: expected.filename,
     fileId,
-    fileSize: remote.size ?? remote.file_size ?? expected.fileSize ?? null,
+    fileSize: numericSize !== undefined ? Number(numericSize) : expected.fileSize ?? remote.size ?? null,
     ctfileUrl: downloadUrl ?? directoryUrl,
     linkType: downloadUrl ? 'file' : 'folder',
     folderUrl: directoryUrl,
@@ -70,8 +82,7 @@ export function verifiedEntry(expected, remote, folderUrl) {
 }
 
 async function main() {
-  // Existing account credentials stay in the runner environment. No credentials,
-  // signed source URLs, source XML or source signatures are published as artifacts.
+  // Credentials, signed source URLs and source XML never become report artifacts.
   const [{ loadEnv, getEnv }, { fetchXml, xmlToJson }, { downloadAllApps }, { CTFileClient }, { getProductFolderName }] = await Promise.all([
     import('../src/env.ts'), import('../src/fetch-xml.ts'), import('../src/download-apps.ts'),
     import('../src/ctfile.ts'), import('../src/ctfile-utils.ts'),
@@ -95,11 +106,11 @@ async function main() {
   const idOf = item => String(item.key || item.folder_id || item.id || '').replace(/^d/, '');
   const nameOf = item => String(item.name || item.folder_name || item.file_name || '');
   const isFolder = item => item.icon === 'folder' || String(item.key || '').startsWith('d');
-  async function list(folderId) {
+  async function list(folderId, kind = 'folder') {
     const all = [];
     const seen = new Set();
     for (let page = 1; page <= 100; page++) {
-      const response = await fetch('https://rest.ctfile.com/v1/public/folder/list', {
+      const response = await fetch(`https://rest.ctfile.com/v1/public/${kind}/list`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session, folder_id: folderKey(folderId), page, page_size: 100 }),
         signal: AbortSignal.timeout(60000),
@@ -112,7 +123,7 @@ async function main() {
         const key = String(row.key || row.id || row.file_id || row.folder_id || nameOf(row));
         if (seen.has(key)) throw new Error('CTFile pagination repeated an entry; refusing an incomplete listing');
         seen.add(key);
-        all.push(row);
+        all.push({ ...row, default_passcode: row.default_passcode ?? data.default_passcode });
       }
       if (rows.length < 100) return all;
     }
@@ -134,31 +145,32 @@ async function main() {
     }
   }
   console.log(`POSTGRESQL18_PLAN ${JSON.stringify(plans.map(({ productName, version, architecture, filename }) => ({ productName, version, architecture, filename })))}`);
-  const rootEntries = await list(rootId); // Fail before downloading if CTFile authentication is invalid.
+  const rootEntries = await list(rootId);
   const workdir = await mkdtemp(join(tmpdir(), 'qnap-postgresql18-'));
   try {
     await mkdir(join(workdir, 'config'));
-    process.chdir(workdir); // Isolate metadata from the general synchronizer.
+    process.chdir(workdir);
     const folders = new Map();
     for (const app of config.plugins.item) {
       if (folders.has(app.name)) continue;
       const folderName = getProductFolderName(app.name);
-      const existing = rootEntries.find(item => isFolder(item) && nameOf(item) === folderName);
-      const productId = existing ? idOf(existing) : (await client.findOrCreateFolder(folderName, rootId, true)).folderId;
+      let product = rootEntries.find(item => isFolder(item) && nameOf(item) === folderName);
+      const productId = product ? idOf(product) : (await client.findOrCreateFolder(folderName, rootId, true)).folderId;
       if (!productId) throw new Error('CTFile did not return the product folder ID');
+      if (!product) product = (await list(rootId)).find(item => isFolder(item) && idOf(item) === String(productId));
       const productEntries = await list(productId);
-      const remoteFiles = productEntries.filter(item => !isFolder(item)).map(file => ({ file, folderId: productId }));
+      const remoteFiles = (await list(productId, 'file')).filter(item => !isFolder(item)).map(file => ({ file, folderUrl: remoteShareLink(product) }));
       for (const child of productEntries.filter(isFolder)) {
-        for (const file of (await list(idOf(child))).filter(item => !isFolder(item))) remoteFiles.push({ file, folderId: idOf(child) });
+        for (const file of (await list(idOf(child), 'file')).filter(item => !isFolder(item))) remoteFiles.push({ file, folderUrl: remoteShareLink(child) });
       }
-      folders.set(app.name, { productId, productEntries, remoteFiles, monthlyId: null });
+      folders.set(app.name, { productId, productEntries, remoteFiles, monthlyId: null, monthlyUrl: undefined });
     }
     const missing = [];
     for (const plan of plans) {
       const folder = folders.get(plan.productName);
       const found = folder.remoteFiles.find(({ file }) => nameOf(file) === plan.filename);
       if (found) {
-        reports.push(verifiedEntry(plan, found.file, client.getFolderUrl(found.folderId)));
+        reports.push(verifiedEntry(plan, found.file, found.folderUrl));
         console.log(`Already on CTFile: ${plan.filename}`);
       } else missing.push(plan);
     }
@@ -177,18 +189,20 @@ async function main() {
         const folder = folders.get(plan.productName);
         if (!folder.monthlyId) {
           const month = new Date().toISOString().slice(0, 7);
-          const existing = folder.productEntries.find(item => isFolder(item) && nameOf(item) === month);
+          let existing = folder.productEntries.find(item => isFolder(item) && nameOf(item) === month);
           folder.monthlyId = existing ? idOf(existing) : (await client.findOrCreateFolder(month, folder.productId, true)).folderId;
           if (!folder.monthlyId) throw new Error('CTFile did not return the monthly folder ID');
+          if (!existing) existing = (await list(folder.productId)).find(item => isFolder(item) && idOf(item) === String(folder.monthlyId));
+          folder.monthlyUrl = remoteShareLink(existing);
         }
-        await client.uploadFile(folder.monthlyId, localPath, true);
+        const uploaded = await client.uploadFile(folder.monthlyId, localPath, true);
         let remote;
-        for (let attempt = 0; attempt < 5; attempt++) {
-          remote = (await list(folder.monthlyId)).find(item => !isFolder(item) && nameOf(item) === plan.filename);
-          if (remote) break;
+        for (let attempt = 0; attempt < 10; attempt++) {
+          remote = (await list(folder.monthlyId, 'file')).find(item => !isFolder(item) && nameOf(item) === plan.filename);
+          if (remote && (remoteShareLink(remote) || folder.monthlyUrl)) break;
           await new Promise(resolve => setTimeout(resolve, 2000));
         }
-        reports.push(verifiedEntry({ ...plan, fileSize: meta.fileSize }, remote, client.getFolderUrl(folder.monthlyId)));
+        reports.push(verifiedEntry({ ...plan, fileSize: meta.fileSize, fileId: uploaded.fileId }, remote, folder.monthlyUrl));
         await report();
         await rm(localPath);
       }
