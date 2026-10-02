@@ -44,7 +44,10 @@ jobs:
           CTFILE_SESSION: ${{ secrets.CTFILE_SESSION }}
           CTFILE_FOLDER_ID: ${{ secrets.CTFILE_FOLDER_ID }}
           DOWNLOAD_CONCURRENCY: '2'
-        run: bun run scripts/postgresql18.mjs
+        run: |
+          # Legacy loadEnv requires a file. Keep it empty: credentials stay in env.
+          touch .env
+          bun run scripts/postgresql18.mjs
       - name: Save verified CTFile links only
         if: always()
         uses: actions/upload-artifact@v4
