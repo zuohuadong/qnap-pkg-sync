@@ -8,17 +8,16 @@ on:
       - scripts/postgresql18.mjs
       - tests/postgresql18.test.mjs
       - .github/workflows/sync-postgresql18.yml
-  # Daily verification and recovery, after the general package sync.
   schedule:
     - cron: '15 0 * * *'
 
 permissions:
   contents: read
 
-# Share the existing synchronizer's lock; never cancel an upload ourselves.
+# Scheduled runs wait; a code fix supersedes a run using the obsolete code.
 concurrency:
   group: sync-packages
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   sync:
@@ -37,6 +36,7 @@ jobs:
       - name: Test package selection and link verification
         run: node --test tests/postgresql18.test.mjs
       - name: Synchronize purchased PostgreSQL 18 packages
+        timeout-minutes: 30
         env:
           QNAP_DOWNLOAD_URL: ${{ secrets.QNAP_DOWNLOAD_URL }}
           QNAP_USERNAME: ${{ secrets.QNAP_USERNAME }}
@@ -45,7 +45,6 @@ jobs:
           CTFILE_FOLDER_ID: ${{ secrets.CTFILE_FOLDER_ID }}
           DOWNLOAD_CONCURRENCY: '2'
         run: |
-          # Legacy loadEnv requires a file. Keep it empty: credentials stay in env.
           touch .env
           bun run scripts/postgresql18.mjs
       - name: Save verified CTFile links only
