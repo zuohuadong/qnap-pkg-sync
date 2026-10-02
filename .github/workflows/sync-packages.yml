@@ -28,13 +28,13 @@ on:
     paths:
       - scripts/purchase-sync-core.mjs
       - scripts/sync-purchases.mjs
-      - tests/purchase-sync.test.mjs
+      - tests/purchase-sync*.test.mjs
       - .github/workflows/sync-packages.yml
   pull_request:
     paths:
       - scripts/purchase-sync-core.mjs
       - scripts/sync-purchases.mjs
-      - tests/purchase-sync.test.mjs
+      - tests/purchase-sync*.test.mjs
       - .github/workflows/sync-packages.yml
 
 permissions:
@@ -56,7 +56,7 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: New reconciliation and existing regression tests
         run: |
-          node --test tests/purchase-sync.test.mjs tests/postgresql18.test.mjs
+          node --test tests/purchase-sync*.test.mjs tests/postgresql18.test.mjs
           bun test tests/ctfile-upload.test.ts tests/concurrency.test.ts
 
   sync:
