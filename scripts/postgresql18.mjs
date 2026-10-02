@@ -26,7 +26,6 @@ export function selectPostgresql18(config) {
     for (const platform of platforms) {
       if (!platform.platformID || typeof platform.location !== 'string') throw new Error('Platform metadata is incomplete');
       const filename = packageFilename(platform.location);
-      // QNAP model IDs are compatibility aliases, not unique binary identities.
       const identity = JSON.stringify([String(app.version), platform.location, platform.signature]);
       if (filenames.has(filename) && filenames.get(filename) !== identity) throw new Error(`Conflicting package filename: ${filename}`);
       filenames.set(filename, identity);
@@ -48,7 +47,6 @@ export function ctfileLink(value) {
 }
 
 export function remoteShareLink(remote) {
-  // `weblink` is CTFile's canonical share field. Prefer it to temporary downloads.
   const link = [remote?.weblink, remote?.share_url, remote?.url, remote?.short_url, remote?.download_url].map(ctfileLink).find(Boolean);
   if (!link) return undefined;
   const url = new URL(link);
@@ -82,7 +80,6 @@ export function verifiedEntry(expected, remote, folderUrl) {
 }
 
 async function main() {
-  // Credentials, signed source URLs and source XML never become report artifacts.
   const [{ loadEnv, getEnv }, { fetchXml, xmlToJson }, { downloadAllApps }, { CTFileClient }, { getProductFolderName }] = await Promise.all([
     import('../src/env.ts'), import('../src/fetch-xml.ts'), import('../src/download-apps.ts'),
     import('../src/ctfile.ts'), import('../src/ctfile-utils.ts'),
@@ -101,7 +98,9 @@ async function main() {
   };
   const session = getEnv('CTFILE_SESSION');
   const rootId = getEnv('CTFILE_FOLDER_ID');
-  const client = new CTFileClient(session);
+  const Client = process.env.CTFILE_UPLOAD_TRANSPORT === 'curl'
+    ? (await import('../src/ctfile-curl.ts')).CurlCTFileClient : CTFileClient;
+  const client = new Client(session);
   const folderKey = id => String(id) === '0' ? '0' : `d${String(id).replace(/^d/, '')}`;
   const idOf = item => String(item.key || item.folder_id || item.id || '').replace(/^d/, '');
   const nameOf = item => String(item.name || item.folder_name || item.file_name || '');
