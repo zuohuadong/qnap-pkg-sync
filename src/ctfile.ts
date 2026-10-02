@@ -264,7 +264,7 @@ export class CTFileClient {
   }
 
   /**
-   * Get folder download URL
+   * Get folder download URL (legacy; prefer the API's canonical weblink).
    */
   getFolderUrl(folderId: string): string {
     const normalizedId = this.normalizeFolderId(folderId);
@@ -344,49 +344,39 @@ export class CTFileClient {
   }
 
   /**
-   * Get file download info after upload
-   * CTFile doesn't provide direct file info API, so we construct the URL or list folder files
+   * Read the canonical download link from CTFile; a file ID alone is not a share URL.
    */
   async getFileInfo(fileId: string, folderId: string, fileName: string, isPublic: boolean = true): Promise<{ downloadUrl: string; shortUrl?: string }> {
     try {
-      // Try to list files in folder to find the uploaded file
       const endpoint = isPublic ? '/public/file/list' : '/private/file/list';
-
-      const data = {
+      const result = await this.request(endpoint, {
         folder_id: this.normalizeFolderId(folderId),
         page: 1,
         page_size: 100,
-      };
-
-      const result = await this.request(endpoint, data);
-
-      // Find the file in the list
+      });
       const files = result.results || result.data || [];
       const file = files.find((f: any) =>
         (f.id === fileId || f.file_id === fileId || f.id?.toString() === fileId || f.key === fileId) ||
         (f.name === fileName || f.file_name === fileName)
       );
-
-      if (file && (file.download_url || file.url)) {
-        return {
-          downloadUrl: file.download_url || file.url,
-          shortUrl: file.short_url,
-        };
+      const location = file?.weblink || file?.share_url || file?.download_url || file?.url;
+      if (typeof location === 'string' && location) {
+        const url = new URL(location, 'https://url88.ctfile.com');
+        if (url.protocol === 'https:' && !url.username && !url.password &&
+            (url.hostname === 'ctfile.com' || url.hostname.endsWith('.ctfile.com'))) {
+          if (result.default_passcode && !url.searchParams.has('p')) {
+            url.searchParams.set('p', String(result.default_passcode));
+          }
+          return { downloadUrl: url.href, shortUrl: file.short_url };
+        }
       }
-
-      // Fallback: construct URL based on file ID
-      return {
-        downloadUrl: `https://url88.ctfile.com/f/${fileId}`,
-        shortUrl: undefined,
-      };
+      console.warn('  ⚠ CTFile has not returned a canonical file share link yet');
     } catch (error) {
-      // Fallback: construct URL based on file ID
-      console.warn(`  ⚠ Failed to get file info, using constructed URL`);
-      return {
-        downloadUrl: `https://url88.ctfile.com/f/${fileId}`,
-        shortUrl: undefined,
-      };
+      console.warn('  ⚠ Failed to retrieve the canonical file share link');
     }
+    // Upload may be committed before the listing is updated. Do not re-upload
+    // or invent a URL; callers can re-read the listing to recover the share link.
+    return { downloadUrl: '', shortUrl: undefined };
   }
 
   /**
@@ -399,37 +389,29 @@ export class CTFileClient {
   /**
    * Display upload progress with spinner
    */
-  private startProgressDisplay(fileName: string, fileSize: number): () => void {
+  private startProgressDisplay(fileName: string, fileSize: number): (completed?: boolean) => void {
     const spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     let frame = 0;
+    let stopped = false;
     const startTime = Date.now();
 
     const interval = setInterval(() => {
       const elapsed = Date.now() - startTime;
-      const speed = (fileSize / elapsed) * 1000; // bytes per second
-
-      // Clear previous line and write new progress
-      process.stdout.write('\r\x1b[K'); // Clear line
+      process.stdout.write('\r\x1b[K');
       process.stdout.write(
-        `  ${spinner[frame]} Uploading... ` +
-        `${formatBytes(fileSize)} | ` +
-        `Elapsed: ${formatDuration(elapsed)} | ` +
-        `Speed: ${formatBytes(speed)}/s`
+        `  ${spinner[frame]} Uploading ${fileName}... ` +
+        `${formatBytes(fileSize)} | Elapsed: ${formatDuration(elapsed)}`
       );
-
       frame = (frame + 1) % spinner.length;
-    }, 100);
+    }, process.stdout.isTTY ? 100 : 10000);
 
-    // Return cleanup function
-    return () => {
+    return (completed = true) => {
+      if (stopped) return;
+      stopped = true;
       clearInterval(interval);
       const elapsed = Date.now() - startTime;
-      const avgSpeed = (fileSize / elapsed) * 1000;
-      process.stdout.write('\r\x1b[K'); // Clear line
-      console.log(
-        `  ✓ Upload completed in ${formatDuration(elapsed)} ` +
-        `(avg speed: ${formatBytes(avgSpeed)}/s)`
-      );
+      process.stdout.write('\r\x1b[K');
+      console.log(`  ${completed ? '✓ Upload completed' : '✗ Upload stopped'} after ${formatDuration(elapsed)}`);
     };
   }
 
@@ -442,7 +424,6 @@ export class CTFileClient {
     console.log(`  📊 File size: ${formatBytes(fileSize)} (${fileSize} bytes)`);
     console.log(`  📁 Folder ID: ${folderId}`);
 
-    // Log system resources before upload
     if (typeof process.memoryUsage === 'function') {
       const mem = process.memoryUsage();
       console.log(`  💾 Memory usage before upload:`);
@@ -451,107 +432,66 @@ export class CTFileClient {
       console.log(`     External: ${formatBytes(mem.external)}`);
     }
 
-    // Check minimum file size
     if (fileSize < 100) {
       throw new Error('CTFile does not support files smaller than 100 bytes');
     }
 
-    // Retry logic
     let lastError: Error | null = null;
 
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       try {
         if (attempt > 1) {
           console.log(`  🔄 Retry attempt ${attempt}/${this.maxRetries}...`);
-          await this.sleep(this.retryDelay * attempt); // Exponential backoff
+          await this.sleep(this.retryDelay * attempt);
         }
 
-        // Get upload URL
         const uploadUrl = await this.getUploadUrl(folderId, filePath, isPublic);
-
-        // Create form data with streaming file
-        // Bun.file supports streaming, so no need to load entire file to memory
         const formData = new FormData();
         formData.append('name', fileName);
         formData.append('filesize', fileSize.toString());
         formData.append('file', file, fileName);
 
-        // Start progress display
         const stopProgress = this.startProgressDisplay(fileName, fileSize);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60 * 60 * 1000);
 
         try {
-          // Upload file with timeout (60 minutes for large files)
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 60 * 60 * 1000);
-
           console.log(`  📡 Starting HTTP upload to CTFile...`);
-          console.log(`  🌐 Upload URL: ${uploadUrl.substring(0, 50)}...`);
-
-          // Log memory before upload
-          const memBefore = process.memoryUsage();
-          console.log(`  💾 Memory before upload: RSS=${formatBytes(memBefore.rss)}, Heap=${formatBytes(memBefore.heapUsed)}`);
-
+          // Do not expose the upload URL's signed query parameters.
+          console.log(`  🌐 Upload host: ${new URL(uploadUrl).hostname}`);
           const uploadStartTime = Date.now();
 
+          // Bun streams FormData. keepalive is incompatible with streaming
+          // multipart bodies and fails before any request reaches CTFile.
           const response = await fetch(uploadUrl, {
             method: 'POST',
             body: formData,
             signal: controller.signal,
-            // @ts-ignore - Bun-specific options
-            keepalive: true,
           });
 
-          clearTimeout(timeoutId);
-
-          const uploadDuration = Date.now() - uploadStartTime;
-          console.log(`  ⏱️  Upload request completed in ${(uploadDuration / 1000).toFixed(2)}s`);
           console.log(`  📥 Response status: ${response.status} ${response.statusText}`);
-
-          // Log memory after upload
-          const memAfter = process.memoryUsage();
-          console.log(`  💾 Memory after upload: RSS=${formatBytes(memAfter.rss)}, Heap=${formatBytes(memAfter.heapUsed)}`);
-          console.log(`  📈 Memory delta: RSS=${formatBytes(memAfter.rss - memBefore.rss)}, Heap=${formatBytes(memAfter.heapUsed - memBefore.heapUsed)}`);
-
           if (!response.ok) {
-            const errorText = await response.text().catch(() => 'Unable to read error response');
-            throw new Error(`Upload failed: ${response.status} ${response.statusText} - ${errorText}`);
+            await response.body?.cancel();
+            throw new Error(`Upload failed: ${response.status} ${response.statusText}`);
           }
 
-          console.log(`  📦 Parsing response JSON...`);
-
-          // Get response text first to handle parsing errors
           const responseText = await response.text();
           let result: any;
-
           try {
             result = JSON.parse(responseText);
-          } catch (parseError) {
-            console.error(`  ❌ Failed to parse JSON response`);
-            console.error(`  📄 Response preview (first 500 chars):`);
-            console.error(`     ${responseText.substring(0, 500)}`);
-            throw new Error(`Failed to parse JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
+          } catch {
+            throw new Error('CTFile upload did not return valid JSON');
           }
 
-          // Stop progress display
-          stopProgress();
-
-          // Log the parsed result for debugging
-          console.log(`  📋 Upload response:`, JSON.stringify(result).substring(0, 200));
-
           const fileId = result.id?.toString() || result.file_id?.toString() || '';
-
           if (!fileId) {
-            console.error(`  ⚠️  Response missing file ID. Full response:`, JSON.stringify(result, null, 2));
             throw new Error('No file ID returned from upload');
           }
 
-          console.log(`  ✓ Upload succeeded on attempt ${attempt}`);
+          stopProgress();
+          console.log(`  ✓ Upload succeeded on attempt ${attempt} in ${((Date.now() - uploadStartTime) / 1000).toFixed(2)}s`);
           console.log(`  🆔 File ID: ${fileId}`);
-
-          // Get file download URL
-          console.log(`  🔗 Fetching download URL...`);
           const fileInfo = await this.getFileInfo(fileId, folderId, fileName, isPublic);
-
           return {
             fileName,
             fileId,
@@ -559,36 +499,26 @@ export class CTFileClient {
             shortUrl: fileInfo.shortUrl,
           };
         } catch (error) {
-          // Stop progress display on error
-          stopProgress();
-
-          // Log detailed error information
-          console.error(`  ❌ Upload error details:`);
-          if (error instanceof Error) {
-            console.error(`     Name: ${error.name}`);
-            console.error(`     Message: ${error.message}`);
-            console.error(`     Stack: ${error.stack?.split('\n')[0]}`);
-
-            if (error.name === 'AbortError') {
-              throw new Error(`Upload timeout after 60 minutes`);
-            }
-            throw error;
+          stopProgress(false);
+          if (error instanceof Error && error.name === 'AbortError') {
+            throw new Error('Upload timeout after 60 minutes');
           }
           throw error;
+        } finally {
+          // Also clear the deadline when fetch rejects or response parsing fails.
+          // Otherwise a failed CLI run stays alive for an additional hour.
+          clearTimeout(timeoutId);
         }
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
-
         if (attempt < this.maxRetries) {
           console.error(`  ⚠ Attempt ${attempt} failed: ${lastError.message}`);
-          console.log(`  ⏳ Waiting ${this.retryDelay * attempt / 1000}s before retry...`);
         } else {
           console.error(`  ✗ All ${this.maxRetries} attempts failed`);
         }
       }
     }
 
-    // If we get here, all retries failed
     throw new Error(`Upload failed after ${this.maxRetries} attempts: ${lastError?.message || 'Unknown error'}`);
   }
 }
