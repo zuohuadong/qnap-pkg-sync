@@ -28,4 +28,5 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - name: Exercise the production Bun runtime without credentials
-        run: bun test tests/purchase-sync*.test.mjs tests/postgresql18.test.mjs tests/ctfile-upload.test.ts tests/concurrency.test.ts
+        # Historical inventory tests exercise five calls spaced 1.5 seconds apart.
+        run: bun test --timeout 15000 tests/purchase-sync*.test.mjs tests/postgresql18.test.mjs tests/ctfile-upload.test.ts tests/concurrency.test.ts
