@@ -79,11 +79,25 @@ jobs:
                   }
                 } catch (error) { console.log(`LIST_ERROR ${kind} ${error.message}`); }
               }
-              try {
-                const response = await fetch(`https://url88.ctfile.com/dir/${keyOf(child)}`, { signal: AbortSignal.timeout(30000) });
-                const html = await response.text();
-                console.log('DIRECTORY_PAGE ' + JSON.stringify({ status: response.status, url: response.url, title: html.match(/<title>([^<]*)<\/title>/i)?.[1] }));
-              } catch (error) { console.log(`DIRECTORY_PAGE_ERROR ${error.message}`); }
             }
+          }
+          BUN
+      - name: Inspect public CTFile client share routes without account credentials
+        run: |
+          bun run - <<'BUN'
+          const response = await fetch('https://www.ctfile.com/', { signal: AbortSignal.timeout(30000) });
+          const html = await response.text();
+          const urls = [...html.matchAll(/(?:src|href)=["']([^"']+\.js(?:\?[^"']*)?)["']/g)].map(match => new URL(match[1], response.url).href);
+          console.log('PUBLIC_CLIENT_SCRIPTS ' + JSON.stringify([...new Set(urls)]));
+          const links = [...html.matchAll(/href=["']([^"']+)["']/g)].map(match => match[1]).filter(x => /ctfile|login|home|api/i.test(x));
+          console.log('PUBLIC_CLIENT_LINKS ' + JSON.stringify([...new Set(links)].slice(0, 20)));
+          for (const url of [...new Set(urls)].slice(0, 10)) {
+            const host = new URL(url).hostname;
+            if (host !== 'ctfile.com' && !host.endsWith('.ctfile.com')) continue;
+            try {
+              const script = await (await fetch(url, { signal: AbortSignal.timeout(30000) })).text();
+              const endpoints = [...script.matchAll(/.{0,100}(?:public\/(?:file|folder)|share_url|\/share|\/link|folder\/url).{0,180}/g)].map(x => x[0]);
+              console.log('PUBLIC_CLIENT_ROUTES ' + JSON.stringify({ url, matches: [...new Set(endpoints)].slice(0, 35) }));
+            } catch (error) { console.log('PUBLIC_CLIENT_ERROR ' + error.message); }
           }
           BUN
