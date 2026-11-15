@@ -86,7 +86,7 @@ test('terminal purchase feed statuses survive main and report.json without secre
     assert.ok(!logs.join('\n').includes('PRIVATE'));
     assert.ok(!logs.join('\n').includes('purchase.example'));
   } finally {
-    process.chdir(cwd); process.exitCode = exitCode;
+    process.chdir(cwd); process.exitCode = exitCode ?? 0;
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -135,7 +135,7 @@ test('purchase feed still rejects DOCTYPE, ENTITY, and payloads over 8 MiB', asy
       assert.equal(report.pending[0].error, 'INVALID_PURCHASE_FEED');
     }
   } finally {
-    process.chdir(cwd); process.exitCode = exitCode;
+    process.chdir(cwd); process.exitCode = exitCode ?? 0;
     await rm(directory, { recursive: true, force: true });
   }
 });
