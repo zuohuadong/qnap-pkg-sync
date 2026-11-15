@@ -389,7 +389,12 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
       api.searchParams.set('path', share.pathname.split('/')[1]);
       api.searchParams.set('f', share.pathname.split('/')[2]);
       api.searchParams.set('passcode', share.searchParams.get('p') || '');
-      return jsonResponse(await apiFetch(api, { headers: { Referer: link }, redirect: 'error', signal: AbortSignal.timeout(30000) }));
+      const response = await apiFetch(api, { headers: { Referer: link }, redirect: 'error', signal: AbortSignal.timeout(30000) });
+      const data = await jsonResponse(response);
+      // Share paths and passcodes stay out of logs; only the API verdict is diagnostic.
+      const code = String(data?.code ?? 'missing').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 20) || 'unknown';
+      console.log(`CTFILE_PUBLIC_HTTP status=${response.status} code=${code}`);
+      return data;
     },
   };
 }
