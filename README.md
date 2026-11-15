@@ -69,6 +69,7 @@ WEBDAV_URL=https://your-webdav-server.com
 WEBDAV_USERNAME=your_webdav_username
 WEBDAV_PASSWORD=your_webdav_password
 WEBDAV_ROOT_PATH=/qnaporg
+WEBDAV_FALLBACK=on-failure
 ```
 
 ### 配置文件结构
@@ -395,19 +396,27 @@ if (uploadProgress[filename]) {
 
 ### WebDAV 备用上传
 
-CTFile 上传失败时自动切换到 WebDAV：
+每日工作流使用的 `bun run sync` 支持 `WEBDAV_FALLBACK`：
 
-```typescript
-try {
-  // 尝试 CTFile 上传
-  await ctfile.uploadFile(file);
-} catch (error) {
-  // 失败时 fallback 到 WebDAV
-  await webdav.uploadFile(file);
-}
-```
+- `on-failure`（默认）：CTFile 上传地址请求失败或确认未发送时立即转用 WebDAV；
+  结果不明确时先回读 CTFile，只有 `UPLOAD_NOT_VERIFIED` 才回退一次。
+- `always`：直接使用 WebDAV，不请求 CTFile 上传端点。
+- `off`：仅使用 CTFile。
 
-提高上传成功率，确保数据安全。
+首次 CTFile 上传失败后，本次运行触发熔断，后续包直接走 WebDAV，并记录
+`CTFILE_UPLOAD_DEGRADED switched=webdav`。Actions 可设置同名仓库 Variable 选择模式。
+需要回退但缺少 WebDAV 配置时，报告 `WEBDAV_NOT_CONFIGURED`，不会静默忽略。
+
+WebDAV 自动创建 `WEBDAV_ROOT_PATH/<产品目录>/<YYYY-MM>`，使用 `If-None-Match: *` 防止覆盖。
+PUT 成功或返回 412 后，仍须通过 `PROPFIND Depth: 0` 验证名称和精确字节大小；
+不符时报 `WEBDAV_SIZE_MISMATCH`，无法验证时报 `WEBDAV_UPLOAD_NOT_VERIFIED`。
+已验证收据保留源指纹、相对路径、大小和本地 MD5；下次指纹与远端大小仍匹配时跳过下载、上传。
+仅核对大小不代表远端 MD5 已验证。
+
+报告最后一列为 `Location`：CTFile 保留 `[Download](url)`，WebDAV 显示
+`WebDAV: <相对路径>`，不输出服务器地址、账号密码或购买源地址。
+旧分步命令 `bun run upload` 仍使用 `MAX_UPLOAD_FILE_SIZE` 规则。
+完整说明见 [已购软件自动同步](docs/automatic-purchases.md)。
 
 ### BBR TCP 拥塞控制
 

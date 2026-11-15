@@ -115,6 +115,34 @@ export function publicPlan(p) {
   return { productName: p.productName, version: p.version, architecture: p.architecture, filename: p.filename };
 }
 
+export function verifyWebdavMetadata(plan, path, remote, expected) {
+  if (typeof path !== 'string' || path.split('/').at(-1) !== plan.filename ||
+      !/^[A-Za-z0-9._~!$&'()*+,;=@%/-]+$/.test(path) || path.startsWith('/') || path.includes('//')) fail('WEBDAV_UPLOAD_NOT_VERIFIED');
+  if (!remote || !Number.isSafeInteger(expected.fileSize) || expected.fileSize < 100 ||
+      !Number.isSafeInteger(remote.size)) fail('WEBDAV_UPLOAD_NOT_VERIFIED');
+  if (remote.size !== expected.fileSize) fail('WEBDAV_SIZE_MISMATCH');
+  return { ...publicPlan(plan), storage: 'webdav', webdavPath: path, fileSize: remote.size,
+    ctfileUrl: undefined, checksumVerified: false, verifiedAt: new Date().toISOString() };
+}
+
+async function verifyCtfileUpload(context, adapter, verify) {
+  const { plan, destination, records, republished, receipt, local } = context;
+  const expected = { fileSize: local.fileSize, md5: local.md5, fileId: receipt?.fileId };
+  let lastError;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (attempt) await (adapter.pause || (ms => new Promise(r => setTimeout(r, ms))))(2000 * attempt);
+    try {
+      const candidates = (await adapter.refresh(plan, destination)).filter(r => remoteName(r) === plan.filename && !isFolder(r));
+      for (const candidate of candidates) {
+        // Without a receipt, an old same-name revision cannot confirm a new upload.
+        if (republished && !receipt?.fileId && records.some(r => remoteId(r) === remoteId(candidate))) continue;
+        try { return await verify(candidate, expected); } catch (error) { lastError = error; }
+      }
+    } catch (error) { lastError = error; }
+  }
+  throw lastError || new SyncError('UPLOAD_NOT_VERIFIED');
+}
+
 export async function listAllPages(getPage, pageSize = 100) {
   const rows = [], seen = new Set();
   for (let page = 1; page <= 100; page++) {
@@ -151,14 +179,18 @@ export async function reconcile({ plans, failures = [] }, adapter, options = {})
     if (Date.now() - started >= budgetMs) break; // Untouched packages remain pending for the next full reconciliation.
     let local, stage = 'inventory';
     try {
-      const records = (await adapter.inventory(plan)).filter(r => remoteName(r) === plan.filename && !isFolder(r));
       const previous = receipts[plan.key];
       const republished = previous && previous.fingerprint !== plan.fingerprint;
+      let verified;
+      if (previous?.storage === 'webdav' && !republished) {
+        try { verified = await adapter.verifyWebdav(plan, previous, previous); }
+        catch { /* A stale or unavailable WebDAV receipt falls back to normal inventory. */ }
+      }
+      const records = verified ? [] : (await adapter.inventory(plan)).filter(r => remoteName(r) === plan.filename && !isFolder(r));
       const verify = async (record, expected = {}) => {
         const url = shareLink(record);
         return verifyMetadata(plan, record, await adapter.publicInfo(url), expected);
       };
-      let verified;
       if (records.length && !republished) {
         stage = 'verification';
         // Prefer a known receipt when names collide, but do not trust it without checking the remote.
@@ -179,26 +211,29 @@ export async function reconcile({ plans, failures = [] }, adapter, options = {})
         stage = 'folder'; const destination = await adapter.ensureDestination(plan);
         stage = 'upload'; let receipt;
         // A server can commit an upload but lose its response. Always read back before concluding failure.
-        try { receipt = await adapter.upload(plan, local, destination); } catch { /* Resolve ambiguous outcome below. */ }
-        stage = 'verification';
-        const expected = { fileSize: local.fileSize, md5: local.md5, fileId: receipt?.fileId };
-        let lastError;
-        for (let attempt = 0; attempt < 5 && !verified; attempt++) {
-          if (attempt) await (adapter.pause || (ms => new Promise(r => setTimeout(r, ms))))(2000 * attempt);
-          try {
-            const candidates = (await adapter.refresh(plan, destination)).filter(r => remoteName(r) === plan.filename && !isFolder(r));
-            for (const candidate of candidates) {
-              // Without a receipt, never mistake an old same-name revision for the new upload.
-              if (republished && !receipt?.fileId && records.some(r => remoteId(r) === remoteId(candidate))) continue;
-              try { verified = await verify(candidate, expected); break; } catch (error) { lastError = error; }
-            }
-          } catch (error) { lastError = error; }
+        try { receipt = await adapter.upload(plan, local, destination); }
+        catch (error) {
+          if (error instanceof SyncError && error.code.startsWith('WEBDAV_')) throw error;
+          // A lost CTFile acknowledgement is resolved by read-back, not another upload.
         }
-        if (!verified) throw lastError || new SyncError('UPLOAD_NOT_VERIFIED');
+        stage = 'verification';
+        if (receipt?.storage === 'webdav') {
+          verified = await adapter.verifyWebdav(plan, receipt, local);
+        } else {
+          try {
+            verified = await verifyCtfileUpload({ plan, destination, records, republished, receipt, local }, adapter, verify);
+          } catch (error) {
+            if (error?.code !== 'UPLOAD_NOT_VERIFIED' || !adapter.fallbackUpload) throw error;
+            receipt = await adapter.fallbackUpload(plan, local, destination);
+            verified = await adapter.verifyWebdav(plan, receipt, local);
+          }
+        }
       }
       verified.action = local ? 'uploaded' : 'existing';
-      if (!dryRun) receipts[plan.key] = { fingerprint: plan.fingerprint, fileId: verified.fileId, fileSize: verified.fileSize,
-        ...(local?.md5 ? { md5: local.md5 } : previous?.fileId === verified.fileId && previous.md5 ? { md5: previous.md5 } : {}) };
+      if (!dryRun) receipts[plan.key] = verified.storage === 'webdav'
+        ? { fingerprint: plan.fingerprint, storage: 'webdav', path: verified.webdavPath, fileSize: verified.fileSize, md5: local?.md5 || previous?.md5 }
+        : { fingerprint: plan.fingerprint, fileId: verified.fileId, fileSize: verified.fileSize,
+          ...(local?.md5 ? { md5: local.md5 } : previous?.fileId === verified.fileId && previous.md5 ? { md5: previous.md5 } : {}) };
       report.verified.push(verified);
       pending.delete(plan.key);
     } catch (error) {
@@ -216,8 +251,8 @@ export async function reconcile({ plans, failures = [] }, adapter, options = {})
 export function markdownReport(report) {
   const cell = x => String(x ?? '').replace(/[\r\n|<>\[\]`]/g, ' ');
   const lines = ['# QNAP purchased packages → CTFile', '', `Mode: ${report.mode}; verified: ${report.verified.length}; pending: ${report.pending.length}`, '',
-    '| Product | Version | Architecture | File | CTFile |', '|---|---|---|---|---|'];
-  for (const p of report.verified) lines.push(`| ${cell(p.productName)} | ${cell(p.version)} | ${cell(p.architecture)} | ${cell(p.filename)} | [Download](${p.ctfileUrl}) |`);
+    '| Product | Version | Architecture | File | Location |', '|---|---|---|---|---|'];
+  for (const p of report.verified) lines.push(`| ${cell(p.productName)} | ${cell(p.version)} | ${cell(p.architecture)} | ${cell(p.filename)} | ${p.storage === 'webdav' ? `WebDAV: ${cell(p.webdavPath)}` : `[Download](${p.ctfileUrl})`} |`);
   if (report.pending.length) {
     lines.push('', '## Pending — retried from the complete purchase feed on the next run', '', '| File / Product | Stage | Error |', '|---|---|---|');
     for (const p of report.pending) lines.push(`| ${cell(p.filename || p.productName)} | ${cell(p.stage)} | ${cell(p.error)} |`);

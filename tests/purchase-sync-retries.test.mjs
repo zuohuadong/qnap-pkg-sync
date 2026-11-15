@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { rateLimitedFetch, createAdapter } from '../scripts/sync-purchases.mjs';
+import { mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { rateLimitedFetch, createAdapter, fetchPurchaseFeed, main } from '../scripts/sync-purchases.mjs';
+import { SyncError } from '../scripts/purchase-sync-core.mjs';
 
 test('429 respects Retry-After before replaying an inventory read', async () => {
   let calls = 0, clock = 0; const delays = [];
@@ -49,4 +53,89 @@ test('retry transport cannot send requests to unrelated hosts', async () => {
   const request = rateLimitedFetch(async () => { calls++; return Response.json({}); });
   await assert.rejects(request('https://unrelated.example/collect', {}), /UNSAFE_URL/);
   assert.equal(calls, 0);
+});
+
+test('terminal purchase feed statuses survive main and report.json without secrets', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'purchase-feed-test-'));
+  const cwd = process.cwd(), exitCode = process.exitCode;
+  const logs = [];
+  t.mock.method(console, 'log', line => logs.push(line));
+  process.chdir(directory);
+  try {
+    await mkdir('.sync-state');
+    await writeFile('.sync-state/receipts.json', '{"preserved":true}\n');
+    for (const status of [401, 403, 404, 410]) {
+      let calls = 0;
+      const report = await main({ QNAP_DOWNLOAD_URL: 'https://purchase.example/feed?token=PRIVATE',
+        QNAP_USERNAME: 'PRIVATE_USER', QNAP_PASSWORD: 'PRIVATE_PASSWORD' }, {
+        fetchImpl: async (_url, options) => {
+          calls++; assert.equal(options.redirect, 'error');
+          return new Response('private body', { status, headers: { 'content-type': 'text/html; charset=utf-8' } });
+        }, pause: async () => assert.fail('Terminal status must not retry'),
+      });
+      assert.equal(calls, 1);
+      assert.equal(report.pending[0].stage, 'initialization');
+      assert.equal(report.pending[0].error, `PURCHASE_FEED_UNAVAILABLE_${status}`);
+      const serialized = await readFile(join(directory, 'reports/purchases/report.json'), 'utf8');
+      assert.equal(JSON.parse(serialized).pending[0].error, `PURCHASE_FEED_UNAVAILABLE_${status}`);
+      assert.ok(!serialized.includes('PRIVATE'));
+      assert.ok(!serialized.includes('purchase.example'));
+      assert.ok(logs.includes(`PURCHASE_FEED_HTTP status=${status} content_type=text/html`));
+      assert.equal(await readFile('.sync-state/receipts.json', 'utf8'), '{"preserved":true}\n');
+    }
+    assert.ok(!logs.join('\n').includes('PRIVATE'));
+    assert.ok(!logs.join('\n').includes('purchase.example'));
+  } finally {
+    process.chdir(cwd); process.exitCode = exitCode;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('purchase feed retries 429 with small Retry-After and then succeeds', async () => {
+  let calls = 0; const delays = [];
+  const response = await fetchPurchaseFeed('https://purchase.example/feed', {}, {
+    fetchImpl: async () => ++calls === 1
+      ? new Response('', { status: 429, headers: { 'retry-after': '3' } }) : new Response('<plugins/>'),
+    pause: async ms => delays.push(ms),
+  });
+  assert.equal(await response.text(), '<plugins/>');
+  assert.equal(calls, 2); assert.deepEqual(delays, [3000]);
+});
+
+test('body cancellation failure cannot mask a terminal feed status', async () => {
+  await assert.rejects(fetchPurchaseFeed('https://purchase.example/feed', {}, {
+    fetchImpl: async () => ({ ok: false, status: 403, headers: new Headers({ 'content-type': 'text/html' }),
+      body: { cancel: async () => { throw new Error('PRIVATE stream error'); } } }),
+  }), error => error instanceof SyncError && error.code === 'PURCHASE_FEED_UNAVAILABLE_403');
+});
+
+test('purchase feed network, 429 and all 5xx retries are bounded with short backoff', async () => {
+  for (const status of ['network', 429, 500, 501, 503, 599]) {
+    let calls = 0; const delays = [];
+    await assert.rejects(fetchPurchaseFeed('https://purchase.example/feed', {}, {
+      fetchImpl: async () => {
+        calls++;
+        if (status === 'network') throw new Error('PRIVATE signed URL');
+        return new Response('', { status, headers: { 'retry-after': '3600' } });
+      }, pause: async ms => delays.push(ms),
+    }), error => error instanceof SyncError && error.code === (status === 'network'
+      ? 'PURCHASE_FEED_NETWORK_FAILED' : `PURCHASE_FEED_UNAVAILABLE_${status}`));
+    assert.equal(calls, 3); assert.deepEqual(delays, [2000, 4000]);
+  }
+});
+
+test('purchase feed still rejects DOCTYPE, ENTITY, and payloads over 8 MiB', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'purchase-feed-validation-'));
+  const cwd = process.cwd(), exitCode = process.exitCode;
+  process.chdir(directory);
+  try {
+    for (const xml of ['<!DOCTYPE plugins><plugins/>', '<!ENTITY secret "private"><plugins/>', 'x'.repeat(8 * 1024 * 1024 + 1)]) {
+      const report = await main({ QNAP_DOWNLOAD_URL: 'https://purchase.example/feed',
+        QNAP_USERNAME: 'test', QNAP_PASSWORD: 'test' }, { fetchImpl: async () => new Response(xml) });
+      assert.equal(report.pending[0].error, 'INVALID_PURCHASE_FEED');
+    }
+  } finally {
+    process.chdir(cwd); process.exitCode = exitCode;
+    await rm(directory, { recursive: true, force: true });
+  }
 });

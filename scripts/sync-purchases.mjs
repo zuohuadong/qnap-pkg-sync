@@ -7,7 +7,8 @@ import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { SyncError, planPurchases, reconcile, markdownReport, listAllPages, remoteName, remoteId, isFolder } from './purchase-sync-core.mjs';
+import { parseStringPromise, processors } from 'xml2js';
+import { SyncError, planPurchases, reconcile, markdownReport, listAllPages, remoteName, remoteId, isFolder, verifyWebdavMetadata } from './purchase-sync-core.mjs';
 
 const fail = code => { throw new SyncError(code); };
 const required = (env, key) => { if (!env[key]) fail(`MISSING_${key}`); return env[key]; };
@@ -80,17 +81,23 @@ export async function downloadPackage(plan, fetchImpl = fetch, limit = 8 * 1024 
 }
 
 /** cURL config via stdin keeps signed URLs and WebDAV credentials out of process arguments/logs. */
-export async function curlTransfer(url, local, { webdav, timeoutSeconds = 1200 } = {}) {
-  httpsUrl(url, true);
-  const responsePath = join(local.directory, 'upload-response.json');
-  const filename = local.path.split('/').pop();
+export async function curlTransfer(url, local, { webdav, method = 'PUT', timeoutSeconds = 1200 } = {}) {
+  httpsUrl(url, !webdav);
+  const directory = local?.directory || await mkdtemp(join(tmpdir(), 'qnap-webdav-'));
+  const responsePath = join(directory, 'upload-response.json');
   const args = ['--disable', '--config', '-', '--silent', '--show-error', '--fail-with-body',
     '--proto', '=https', '--connect-timeout', '30', '--max-time', String(timeoutSeconds),
     '--speed-limit', '1024', '--speed-time', '90', '--header', 'Expect:', '--output', responsePath,
-    '--write-out', '%{http_code} %{size_upload}'];
-  if (webdav) args.push('--upload-file', local.path, '--header', 'If-None-Match: *');
-  else args.push('--form-string', `name=${filename}`, '--form-string', `filesize=${local.fileSize}`,
-    '--form', `file=@${local.path};filename=${filename};type=application/octet-stream`);
+    '--max-filesize', '1048576', '--write-out', '%{http_code} %{size_upload}'];
+  if (webdav) {
+    args.push('--request', method);
+    if (method === 'PUT') args.push('--upload-file', local.path, '--header', 'If-None-Match: *');
+    if (method === 'PROPFIND') args.push('--header', 'Depth: 0');
+  } else {
+    const filename = local.path.split('/').pop();
+    args.push('--form-string', `name=${filename}`, '--form-string', `filesize=${local.fileSize}`,
+      '--form', `file=@${local.path};filename=${filename};type=application/octet-stream`);
+  }
   const child = spawn('curl', args, { stdio: ['pipe', 'pipe', 'pipe'] });
   let output = '', spawnFailed = false;
   child.stdout.on('data', data => { if (output.length < 4096) output += data.toString(); });
@@ -105,11 +112,14 @@ export async function curlTransfer(url, local, { webdav, timeoutSeconds = 1200 }
     child.stdin.end(`url = ${JSON.stringify(url)}\n${webdav ? `user = ${JSON.stringify(`${webdav.username}:${webdav.password}`)}\n` : ''}`);
     const code = await completed;
     const match = output.trim().match(/^(\d{3}) (\d+)$/);
-    if (spawnFailed) fail('CURL_UNAVAILABLE');
-    if (!match) fail('UPLOAD_AMBIGUOUS');
+    if (spawnFailed) fail(webdav ? 'WEBDAV_REQUEST_FAILED' : 'CURL_UNAVAILABLE');
+    if (!match) fail(webdav ? 'WEBDAV_REQUEST_FAILED' : 'UPLOAD_AMBIGUOUS');
     const status = Number(match[1]), sent = Number(match[2]);
+    if (webdav) {
+      if (code !== 0 && code !== 22) fail('WEBDAV_REQUEST_FAILED');
+      return { status, body: method === 'PROPFIND' ? await readFile(responsePath, 'utf8') : '' };
+    }
     if (code !== 0 || status < 200 || status >= 300) fail(sent ? 'UPLOAD_AMBIGUOUS' : 'UPLOAD_NOT_SENT');
-    if (webdav) return {}; // The REST inventory + public link will supply the canonical receipt.
     if ((await stat(responsePath)).size > 1024 * 1024) fail('INVALID_UPLOAD_RESPONSE');
     let data;
     try { data = JSON.parse(await readFile(responsePath, 'utf8')); } catch { fail('INVALID_UPLOAD_RESPONSE'); }
@@ -117,7 +127,34 @@ export async function curlTransfer(url, local, { webdav, timeoutSeconds = 1200 }
     const id = remoteId(item).replace(/^f/, '');
     if (!/^\d+$/.test(id)) fail('INVALID_UPLOAD_RECEIPT');
     return { fileId: id };
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+    if (!local?.directory) await rm(directory, { recursive: true, force: true });
+  }
+}
+
+export async function fetchPurchaseFeed(url, options, { fetchImpl = fetch,
+  pause = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let response;
+    try {
+      response = await fetchImpl(url, { ...options, redirect: 'error', signal: AbortSignal.timeout(60000) });
+    } catch {
+      if (attempt === 2) fail('PURCHASE_FEED_NETWORK_FAILED');
+      await pause(2000 * (attempt + 1)); continue;
+    }
+    if (response.ok) return response;
+    const contentType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    console.log(`PURCHASE_FEED_HTTP status=${response.status} content_type=${/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(contentType) ? contentType : 'unknown'}`);
+    // Body cleanup must not obscure the terminal HTTP status or prevent a retry.
+    await response.body?.cancel().catch(() => {});
+    if (attempt === 2 || (response.status !== 429 && response.status < 500) || response.status > 599) {
+      fail(`PURCHASE_FEED_UNAVAILABLE_${response.status}`);
+    }
+    const retryAfter = response.headers.get('retry-after');
+    await pause(retryAfter && /^\d+$/.test(retryAfter) && Number(retryAfter) <= 10
+      ? Number(retryAfter) * 1000 : 2000 * (attempt + 1));
+  }
 }
 
 /** One serialized API lane, with bounded Retry-After-aware recovery for reads. */
@@ -163,7 +200,89 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
   const session = required(env, 'CTFILE_SESSION');
   const rootId = folderId(required(env, 'CTFILE_FOLDER_ID'));
   const products = new Map();
+  const fallback = env.WEBDAV_FALLBACK || 'on-failure';
+  if (!['on-failure', 'always', 'off'].includes(fallback)) fail('INVALID_WEBDAV_FALLBACK');
+  let uploadProvider = fallback === 'always' ? 'webdav' : 'ctfile';
+  const webdavFolders = new Set();
   let root;
+  const pathSegments = path => String(path).split('/').filter(Boolean).map(segment => {
+    if (segment === '.' || segment === '..' || /[\\\r\n?#]/.test(segment)) fail('INVALID_WEBDAV_PATH');
+    return encodeURIComponent(segment);
+  });
+  const webdavRoot = pathSegments(env.WEBDAV_ROOT_PATH || '/qnaporg-github').join('/');
+  const webdavPath = (relativePath, filename) => [webdavRoot, ...pathSegments(relativePath), ...pathSegments(filename)].filter(Boolean).join('/');
+  function webdavUrl(path) {
+    if (!env.WEBDAV_URL || !env.WEBDAV_USERNAME || !env.WEBDAV_PASSWORD) fail('WEBDAV_NOT_CONFIGURED');
+    const base = httpsUrl(env.WEBDAV_URL);
+    base.pathname = `${base.pathname.replace(/\/+$/, '')}/${path}`;
+    base.search = ''; base.hash = '';
+    return base.href;
+  }
+  const webdavOptions = method => ({ method, webdav: { username: env.WEBDAV_USERNAME, password: env.WEBDAV_PASSWORD } });
+  async function webdavUpload(file, url) {
+    const response = await transfer(url, file, webdavOptions('PUT'));
+    if (response.status !== 412 && (response.status < 200 || response.status >= 300)) fail('WEBDAV_UPLOAD_FAILED');
+  }
+  async function webdavStat(url) {
+    let response;
+    try { response = await transfer(url, undefined, webdavOptions('PROPFIND')); }
+    catch { fail('WEBDAV_UPLOAD_NOT_VERIFIED'); }
+    if (response.status === 404) return null;
+    if (response.status !== 207 || /<!DOCTYPE|<!ENTITY/i.test(response.body)) fail('WEBDAV_UPLOAD_NOT_VERIFIED');
+    let multistatus;
+    try {
+      multistatus = await parseStringPromise(response.body, { explicitArray: false, tagNameProcessors: [processors.stripPrefix] });
+    } catch { fail('WEBDAV_UPLOAD_NOT_VERIFIED'); }
+    const responses = multistatus?.multistatus?.response;
+    const target = new URL(url);
+    const matches = (Array.isArray(responses) ? responses : [responses]).filter(entry => {
+      try { return new URL(entry.href, target).href === target.href; } catch { return false; }
+    });
+    if (matches.length !== 1) fail('WEBDAV_UPLOAD_NOT_VERIFIED');
+    const properties = matches[0].propstat;
+    for (const property of Array.isArray(properties) ? properties : [properties]) {
+      const size = property?.prop?.getcontentlength;
+      if (/^HTTP\/[\d.]+ 200(?:\s|$)/.test(property?.status) && /^\d+$/.test(String(size)) && Number.isSafeInteger(Number(size))) return { size: Number(size) };
+    }
+    fail('WEBDAV_UPLOAD_NOT_VERIFIED');
+  }
+  async function webdavEnsureFolder(url) {
+    const base = new URL(webdavUrl(''));
+    const target = new URL(url);
+    if (target.origin !== base.origin || !target.pathname.startsWith(base.pathname)) fail('INVALID_WEBDAV_PATH');
+    let folder = base.href.replace(/\/$/, '');
+    for (const segment of target.pathname.slice(base.pathname.length).split('/').filter(Boolean)) {
+      folder += `/${segment}`;
+      if (webdavFolders.has(folder)) continue;
+      const response = await transfer(folder, undefined, webdavOptions('MKCOL'));
+      if (![301, 405].includes(response.status) && (response.status < 200 || response.status >= 300)) fail('WEBDAV_FOLDER_FAILED');
+      webdavFolders.add(folder);
+    }
+  }
+  async function verifyWebdav(plan, receipt, expected) {
+    const month = String(receipt.path).split('/').at(-2);
+    if (!/^\d{4}-(?:0[1-9]|1[0-2])$/.test(month) ||
+        receipt.path !== webdavPath(`${plan.folder}/${month}`, plan.filename)) fail('WEBDAV_UPLOAD_NOT_VERIFIED');
+    return verifyWebdavMetadata(plan, receipt.path, await webdavStat(webdavUrl(receipt.path)), expected);
+  }
+  function degradeUploads() {
+    if (fallback === 'off' || uploadProvider === 'webdav') return;
+    uploadProvider = 'webdav';
+    console.log('CTFILE_UPLOAD_DEGRADED switched=webdav');
+  }
+  async function uploadWebdav(plan, local, destination) {
+    const path = webdavPath(destination.relativePath, plan.filename);
+    const url = webdavUrl(path);
+    try {
+      await webdavEnsureFolder(url.slice(0, url.lastIndexOf('/')));
+      await webdavUpload(local, url);
+      await verifyWebdav(plan, { path }, local);
+    } catch (error) {
+      if (error instanceof SyncError && error.code.startsWith('WEBDAV_')) throw error;
+      fail('WEBDAV_UPLOAD_FAILED');
+    }
+    return { storage: 'webdav', path };
+  }
   async function request(endpoint, body) {
     return jsonResponse(await apiFetch(`https://rest.ctfile.com/v1/public/${endpoint}`, {
       method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/json' },
@@ -217,28 +336,36 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
   }
   return {
     inventory,
+    webdavUpload, webdavStat, webdavEnsureFolder, webdavPath, verifyWebdav,
+    async fallbackUpload(plan, local, destination) {
+      if (fallback === 'off') fail('UPLOAD_NOT_VERIFIED');
+      degradeUploads();
+      return uploadWebdav(plan, local, destination);
+    },
     async ensureDestination(plan) {
+      const month = new Date().toISOString().slice(0, 7);
+      const relativePath = `${plan.folder}/${month}`;
+      if (uploadProvider === 'webdav') return { relativePath };
       const state = products.get(plan.folder);
       const product = state?.product ? folderId(remoteId(state.product)) : await ensureFolder(rootId, plan.folder);
-      const month = new Date().toISOString().slice(0, 7);
-      return { id: await ensureFolder(product, month), relativePath: `${plan.folder}/${month}` };
+      return { id: await ensureFolder(product, month), relativePath };
     },
     download: plan => downloadPackage(plan, fetchImpl),
     cleanup: local => rm(local.directory, { recursive: true, force: true }),
     async upload(plan, local, destination) {
-      let data;
-      try { data = await request('file/upload', { folder_id: folderKey(destination.id), name: plan.filename, size: String(local.fileSize), checksum: local.md5 }); }
-      catch { fail('UPLOAD_URL_REQUEST_FAILED'); }
-      if (String(data.code) !== '200' || !data.upload_url) fail('UPLOAD_URL_REQUEST_FAILED');
-      try { return await transfer(data.upload_url, local); }
+      if (uploadProvider === 'webdav') return uploadWebdav(plan, local, destination);
+      try {
+        let data;
+        try { data = await request('file/upload', { folder_id: folderKey(destination.id), name: plan.filename, size: String(local.fileSize), checksum: local.md5 }); }
+        catch { fail('UPLOAD_URL_REQUEST_FAILED'); }
+        if (String(data.code) !== '200' || !data.upload_url) fail('UPLOAD_URL_REQUEST_FAILED');
+        return await transfer(data.upload_url, local);
+      }
       catch (error) {
-        // Never blindly re-upload after a timeout with bytes transmitted.
-        if (error?.code !== 'UPLOAD_NOT_SENT' || !env.WEBDAV_URL || !env.WEBDAV_USERNAME || !env.WEBDAV_PASSWORD) throw error;
-        const base = httpsUrl(env.WEBDAV_URL, true);
-        const path = [base.pathname, env.WEBDAV_ROOT_PATH || '/qnaporg-github', destination.relativePath, plan.filename]
-          .join('/').split('/').filter(Boolean).map(encodeURIComponent).join('/');
-        base.pathname = `/${path}`; base.search = ''; base.hash = '';
-        return transfer(base.href, local, { webdav: { username: env.WEBDAV_USERNAME, password: env.WEBDAV_PASSWORD } });
+        degradeUploads();
+        // Ambiguous transfers must finish CTFile read-back before using another channel.
+        if (fallback === 'off' || !['UPLOAD_URL_REQUEST_FAILED', 'UPLOAD_NOT_SENT'].includes(error?.code)) throw error;
+        return uploadWebdav(plan, local, destination);
       }
     },
     refresh: (_plan, destination) => list(destination.id, 'file'),
@@ -253,7 +380,7 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
   };
 }
 
-export async function main(env = process.env) {
+export async function main(env = process.env, { fetchImpl = fetch, pause } = {}) {
   const reportDir = resolve('reports/purchases');
   const statePath = resolve('.sync-state/receipts.json');
   await mkdir(reportDir, { recursive: true });
@@ -267,11 +394,9 @@ export async function main(env = process.env) {
   try {
     const url = httpsUrl(required(env, 'QNAP_DOWNLOAD_URL'));
     const auth = Buffer.from(`${required(env, 'QNAP_USERNAME')}:${required(env, 'QNAP_PASSWORD')}`).toString('base64');
-    const response = await fetch(url, { headers: { Authorization: `Basic ${auth}` }, redirect: 'error', signal: AbortSignal.timeout(60000) });
-    if (!response.ok) fail('PURCHASE_FEED_UNAVAILABLE');
+    const response = await fetchPurchaseFeed(url, { headers: { Authorization: `Basic ${auth}` } }, { fetchImpl, pause });
     const xml = await response.text();
     if (xml.length > 8 * 1024 * 1024 || /<!DOCTYPE|<!ENTITY/i.test(xml)) fail('INVALID_PURCHASE_FEED');
-    const { parseStringPromise } = await import('xml2js');
     const config = await parseStringPromise(xml, { explicitArray: false, mergeAttrs: true, trim: true });
     let receipts = {};
     try {
@@ -280,7 +405,7 @@ export async function main(env = process.env) {
     } catch { /* Cache loss cannot hide missing packages: re-list every product. */ }
     const desired = planPurchases(config, env.SYNC_PRODUCT || '');
     console.log(`PURCHASE_SYNC_PLAN ${JSON.stringify({ packages: desired.plans.length, invalid: desired.failures.length, mode: env.SYNC_DRY_RUN === 'true' ? 'audit' : 'sync' })}`);
-    report = await reconcile(desired, createAdapter(env), { receipts, save, dryRun: env.SYNC_DRY_RUN === 'true' });
+    report = await reconcile(desired, createAdapter(env, { fetchImpl }), { receipts, save, dryRun: env.SYNC_DRY_RUN === 'true' });
   } catch (error) {
     report = { schemaVersion: 1, mode: env.SYNC_DRY_RUN === 'true' ? 'audit' : 'sync', complete: false,
       verified: [], pending: [{ stage: 'initialization', error: error instanceof SyncError ? error.code : 'INITIALIZATION_FAILED' }], finishedAt: new Date().toISOString() };

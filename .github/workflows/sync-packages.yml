@@ -97,6 +97,7 @@ jobs:
           WEBDAV_USERNAME: ${{ secrets.WEBDAV_USERNAME }}
           WEBDAV_PASSWORD: ${{ secrets.WEBDAV_PASSWORD }}
           WEBDAV_ROOT_PATH: /qnaporg-github
+          WEBDAV_FALLBACK: ${{ vars.WEBDAV_FALLBACK || 'on-failure' }}
         run: bun run sync
       - name: Save receipts even after partial failure
         if: always() && env.SYNC_DRY_RUN != 'true'
@@ -131,17 +132,28 @@ jobs:
           TEST_RESULT: ${{ needs.tests.result }}
         run: |
           node --input-type=module <<'NODE'
+          import { appendFile } from 'node:fs/promises';
           const env = process.env;
           const base = `https://api.github.com/repos/${env.GITHUB_REPOSITORY}`;
           const title = '[QNAP sync] 自动同步失败';
           const run = `https://github.com/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}`;
+          async function skipNotification(message) {
+            console.log(message);
+            if (env.GITHUB_STEP_SUMMARY) await appendFile(env.GITHUB_STEP_SUMMARY, `${message}\n`);
+            process.exit(0);
+          }
           async function api(path, method = 'GET', data) {
             const response = await fetch(base + path, { method, signal: AbortSignal.timeout(30000),
               headers: { Authorization: `Bearer ${env.GH_TOKEN}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
               ...(data ? { body: JSON.stringify(data) } : {}) });
+            if (path.startsWith('/issues') && [410, 404].includes(response.status)) {
+              await skipNotification(`Issues unavailable (HTTP ${response.status}); failure notification skipped`);
+            }
             if (!response.ok) throw new Error(`Notification API HTTP ${response.status}`);
             return response.json();
           }
+          const repository = await api('');
+          if (repository.has_issues === false) await skipNotification('Issues disabled; failure notification skipped');
           let issue;
           for (let page = 1; page <= 10; page++) {
             const rows = await api(`/issues?state=open&per_page=100&page=${page}`);

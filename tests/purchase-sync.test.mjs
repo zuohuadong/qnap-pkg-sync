@@ -200,9 +200,15 @@ test('transport URL validation prevents credential disclosure to other hosts', (
 test('unambiguous unsent REST upload can use configured CTFile WebDAV; ambiguity cannot', async () => {
   const p = plan(), calls = [], env = { CTFILE_SESSION: 's', CTFILE_FOLDER_ID: '1', WEBDAV_URL: 'https://webdav.ctfile.com', WEBDAV_USERNAME: 'u', WEBDAV_PASSWORD: 'p' };
   const adapter = createAdapter(env, { fetchImpl: async () => Response.json({ code: 200, upload_url: 'https://upload.ctfile.com/upload?s=secret' }),
-    transfer: async (url, local, options) => { calls.push(url); if (!options) throw new SyncError('UPLOAD_NOT_SENT'); return {}; } });
-  await adapter.upload(p, { fileSize: 1024, md5 }, { id: '2', relativePath: 'New_Software/2026-10' });
+    transfer: async (url, local, options) => {
+      if (options?.method === 'MKCOL') return { status: 201 };
+      if (options?.method === 'PROPFIND') return { status: 207, body: `<multistatus xmlns="DAV:"><response><href>${new URL(url).pathname}</href><propstat><prop><getcontentlength>1024</getcontentlength></prop><status>HTTP/1.1 200 OK</status></propstat></response></multistatus>` };
+      calls.push(url); if (!options) throw new SyncError('UPLOAD_NOT_SENT');
+      return { status: 201 };
+    } });
+  const receipt = await adapter.upload(p, { fileSize: 1024, md5 }, { id: '2', relativePath: 'New_Software/2026-10' });
   assert.equal(calls.length, 2); assert.ok(calls[1].includes('/qnaporg-github/New_Software/2026-10/'));
+  assert.deepEqual(receipt, { storage: 'webdav', path: `qnaporg-github/New_Software/2026-10/${p.filename}` });
   const ambiguous = createAdapter(env, { fetchImpl: async () => Response.json({ code: 200, upload_url: 'https://upload.ctfile.com/upload' }), transfer: async () => { throw new SyncError('UPLOAD_AMBIGUOUS'); } });
   await assert.rejects(ambiguous.upload(p, { fileSize: 1024, md5 }, { id: '2' }), /AMBIGUOUS/);
 });
