@@ -80,11 +80,12 @@ export async function downloadPackage(plan, fetchImpl = fetch, limit = 8 * 1024 
   }
 }
 
-/** cURL config via stdin keeps signed URLs and WebDAV credentials out of process arguments/logs. */
-export async function curlTransfer(url, local, { webdav, method = 'PUT', timeoutSeconds = 1200 } = {}) {
-  httpsUrl(url, !webdav);
-  const directory = local?.directory || await mkdtemp(join(tmpdir(), 'qnap-webdav-'));
-  const responsePath = join(directory, 'upload-response.json');
+/** The URL and WebDAV credentials travel through stdin so they never reach argv or logs. */
+export function curlConfig(url, webdav) {
+  return `url = ${JSON.stringify(url)}\n${webdav ? `user = ${JSON.stringify(`${webdav.username}:${webdav.password}`)}\n` : ''}`;
+}
+
+export function curlArgs(local, responsePath, { webdav, method = 'PUT', timeoutSeconds = 1200 } = {}) {
   const args = ['--disable', '--config', '-', '--silent', '--show-error', '--fail-with-body',
     '--proto', '=https', '--connect-timeout', '30', '--max-time', String(timeoutSeconds),
     '--speed-limit', '1024', '--speed-time', '90', '--header', 'Expect:', '--output', responsePath,
@@ -98,6 +99,16 @@ export async function curlTransfer(url, local, { webdav, method = 'PUT', timeout
     args.push('--form-string', `name=${filename}`, '--form-string', `filesize=${local.fileSize}`,
       '--form', `file=@${local.path};filename=${filename};type=application/octet-stream`);
   }
+  return args;
+}
+
+/** cURL config via stdin keeps signed URLs and WebDAV credentials out of process arguments/logs. */
+export async function curlTransfer(url, local, options = {}) {
+  const { webdav, method = 'PUT' } = options;
+  httpsUrl(url, !webdav);
+  const directory = local?.directory || await mkdtemp(join(tmpdir(), 'qnap-webdav-'));
+  const responsePath = join(directory, 'upload-response.json');
+  const args = curlArgs(local, responsePath, options);
   const child = spawn('curl', args, { stdio: ['pipe', 'pipe', 'pipe'] });
   let output = '', spawnFailed = false;
   child.stdout.on('data', data => { if (output.length < 4096) output += data.toString(); });
@@ -109,7 +120,7 @@ export async function curlTransfer(url, local, { webdav, method = 'PUT', timeout
   });
   const timer = setTimeout(() => child.kill('SIGKILL'), (timeoutSeconds + 15) * 1000);
   try {
-    child.stdin.end(`url = ${JSON.stringify(url)}\n${webdav ? `user = ${JSON.stringify(`${webdav.username}:${webdav.password}`)}\n` : ''}`);
+    child.stdin.end(curlConfig(url, webdav));
     const code = await completed;
     const match = output.trim().match(/^(\d{3}) (\d+)$/);
     if (spawnFailed) fail(webdav ? 'WEBDAV_REQUEST_FAILED' : 'CURL_UNAVAILABLE');
