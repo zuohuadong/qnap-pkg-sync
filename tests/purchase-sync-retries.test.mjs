@@ -80,7 +80,7 @@ test('terminal purchase feed statuses survive main and report.json without secre
       assert.equal(JSON.parse(serialized).pending[0].error, `PURCHASE_FEED_UNAVAILABLE_${status}`);
       assert.ok(!serialized.includes('PRIVATE'));
       assert.ok(!serialized.includes('purchase.example'));
-      assert.ok(logs.includes(`PURCHASE_FEED_HTTP status=${status} content_type=text/html`));
+      assert.ok(logs.some(line => line.startsWith(`PURCHASE_FEED_HTTP status=${status} content_type=text/html `)));
       assert.equal(await readFile('.sync-state/receipts.json', 'utf8'), '{"preserved":true}\n');
     }
     assert.ok(!logs.join('\n').includes('PRIVATE'));
@@ -102,10 +102,10 @@ test('purchase feed retries 429 with small Retry-After and then succeeds', async
   assert.equal(calls, 2); assert.deepEqual(delays, [3000]);
 });
 
-test('body cancellation failure cannot mask a terminal feed status', async () => {
+test('an unreadable error body cannot mask a terminal feed status', async () => {
   await assert.rejects(fetchPurchaseFeed('https://purchase.example/feed', {}, {
     fetchImpl: async () => ({ ok: false, status: 403, headers: new Headers({ 'content-type': 'text/html' }),
-      body: { cancel: async () => { throw new Error('PRIVATE stream error'); } } }),
+      text: async () => { throw new Error('PRIVATE stream error'); } }),
   }), error => error instanceof SyncError && error.code === 'PURCHASE_FEED_UNAVAILABLE_403');
 });
 

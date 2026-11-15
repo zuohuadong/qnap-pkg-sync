@@ -156,9 +156,12 @@ export async function fetchPurchaseFeed(url, options, { fetchImpl = fetch,
     }
     if (response.ok) return response;
     const contentType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-    console.log(`PURCHASE_FEED_HTTP status=${response.status} content_type=${/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(contentType) ? contentType : 'unknown'}`);
-    // Body cleanup must not obscure the terminal HTTP status or prevent a retry.
-    await response.body?.cancel().catch(() => {});
+    const server = (response.headers.get('server') || '').replace(/[^A-Za-z0-9._-]/g, '').slice(0, 40) || 'unknown';
+    // A sanitized page title distinguishes a WAF/login block page from a QNAP XML error.
+    const title = (await response.text().catch(() => ''))
+      .match(/<title[^>]*>([\s\S]{0,200}?)<\/title>/i)?.[1]
+      ?.replace(/[^\x20-\x7e]+/g, ' ').trim().slice(0, 100) || 'none';
+    console.log(`PURCHASE_FEED_HTTP status=${response.status} content_type=${/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(contentType) ? contentType : 'unknown'} server=${server} title=${title}`);
     if (attempt === 2 || (response.status !== 429 && response.status < 500) || response.status > 599) {
       fail(`PURCHASE_FEED_UNAVAILABLE_${response.status}`);
     }
@@ -405,7 +408,14 @@ export async function main(env = process.env, { fetchImpl = fetch, pause } = {})
   try {
     const url = httpsUrl(required(env, 'QNAP_DOWNLOAD_URL'));
     const auth = Buffer.from(`${required(env, 'QNAP_USERNAME')}:${required(env, 'QNAP_PASSWORD')}`).toString('base64');
-    const response = await fetchPurchaseFeed(url, { headers: { Authorization: `Basic ${auth}` } }, { fetchImpl, pause });
+    const response = await fetchPurchaseFeed(url, {
+      headers: {
+        Authorization: `Basic ${auth}`,
+        Accept: 'application/xml,text/xml,application/json;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+      }
+    }, { fetchImpl, pause });
     const xml = await response.text();
     if (xml.length > 8 * 1024 * 1024 || /<!DOCTYPE|<!ENTITY/i.test(xml)) fail('INVALID_PURCHASE_FEED');
     const config = await parseStringPromise(xml, { explicitArray: false, mergeAttrs: true, trim: true });
