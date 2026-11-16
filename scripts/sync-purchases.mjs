@@ -240,7 +240,7 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
     base.search = ''; base.hash = '';
     return base.href;
   }
-  const webdavOptions = (method, depth = 0) => ({ method, depth, webdav: { username: env.WEBDAV_USERNAME, password: env.WEBDAV_PASSWORD } });
+  const webdavOptions = (method, depth = 0, timeoutSeconds = 1200) => ({ method, depth, timeoutSeconds, webdav: { username: env.WEBDAV_USERNAME, password: env.WEBDAV_PASSWORD } });
   async function webdavUpload(file, url) {
     const response = await transfer(url, file, webdavOptions('PUT'));
     if (response.status !== 412 && (response.status < 200 || response.status >= 300)) fail('WEBDAV_UPLOAD_FAILED');
@@ -269,18 +269,22 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
     fail('WEBDAV_UPLOAD_NOT_VERIFIED');
   }
   async function webdavList(url, depth = 1) {
+    const started = Date.now();
     let response;
-    try { response = await transfer(url, undefined, webdavOptions('PROPFIND', depth)); }
-    catch { fail('WEBDAV_LIST_FAILED'); }
+    try { response = await transfer(url, undefined, webdavOptions('PROPFIND', depth, 120)); }
+    catch { console.log('WEBDAV_LIST_FAILED transport'); fail('WEBDAV_LIST_FAILED'); }
     if (response.status === 404) return [];
-    if (response.status !== 207 || /<!DOCTYPE|<!ENTITY/i.test(response.body)) fail('WEBDAV_LIST_FAILED');
+    if (response.status !== 207 || /<!DOCTYPE|<!ENTITY/i.test(response.body)) {
+      console.log(`WEBDAV_LIST_FAILED status=${response.status}`);
+      fail('WEBDAV_LIST_FAILED');
+    }
     let multistatus;
     try {
       multistatus = await parseStringPromise(response.body, { explicitArray: false, tagNameProcessors: [processors.stripPrefix] });
     } catch { fail('WEBDAV_LIST_FAILED'); }
     const entries = multistatus?.multistatus?.response;
     const self = new URL(url).href;
-    return (Array.isArray(entries) ? entries : [entries]).filter(Boolean).flatMap(entry => {
+    const rows = (Array.isArray(entries) ? entries : [entries]).filter(Boolean).flatMap(entry => {
       let href;
       try { href = new URL(entry.href, url).href; } catch { return []; }
       if (href === self) return [];
@@ -292,6 +296,8 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
       return [{ href, name, folder: prop.resourcetype?.collection !== undefined || /\/$/.test(entry.href),
         size: Number.isSafeInteger(size) && size >= 0 ? size : undefined }];
     });
+    console.log(`WEBDAV_LIST status=207 entries=${rows.length} ms=${Date.now() - started}`);
+    return rows;
   }
 
   async function webdavEnsureFolder(url) {
@@ -402,6 +408,7 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
         }
       }
       const state = { files };
+      console.log(`WEBDAV_INVENTORY folder=${plan.folder} files=${files.length}`);
       products.set(plan.folder, state);
       return state.files;
     } catch (error) { products.set(plan.folder, { error }); throw error; }
