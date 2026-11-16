@@ -29,7 +29,7 @@ test('requests from concurrent consumers still use one spaced API lane', async (
   let clock = 0; const times = [];
   const request = rateLimitedFetch(async () => { times.push(clock); return Response.json({ code: 200 }); },
     { intervalMs: 1500, now: () => clock, pause: async ms => { clock += ms; } });
-  await Promise.all([request('https://rest.ctfile.com/v1/public/file/list', {}), request('https://rest.ctfile.com/v1/public/folder/list', {}), request('https://webapi.ctfile.com/getfile.php', {})]);
+  await Promise.all([request('https://rest.ctfile.com/v1/public/file/list', {}), request('https://rest.ctfile.com/v1/public/folder/list', {}), request('https://rest.ctfile.com/v1/public/file/list', {})]);
   assert.deepEqual(times, [0, 1500, 3000]);
 });
 test('legacy product folder capitalization is reused only when unambiguous', async () => {

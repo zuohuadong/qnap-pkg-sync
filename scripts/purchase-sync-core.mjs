@@ -95,20 +95,14 @@ export function byteSize(row) {
   return Number(value);
 }
 
-export function verifyMetadata(plan, row, publicData, expected = {}) {
+export function verifyInventoryMetadata(plan, row, expected = {}) {
   const id = remoteId(row).replace(/^f/, '');
   if (isFolder(row) || !/^\d+$/.test(id) || remoteName(row) !== plan.filename) fail('REMOTE_IDENTITY_MISMATCH');
   const size = byteSize(row);
   if (expected.fileId && id !== String(expected.fileId).replace(/^f/, '')) fail('UPLOAD_RECEIPT_MISMATCH');
   if (expected.fileSize != null && size !== expected.fileSize) fail('REMOTE_SIZE_MISMATCH');
-  if (String(publicData?.code) !== '200') fail('PUBLIC_SHARE_UNAVAILABLE');
-  const file = publicData.file || publicData.data?.file || publicData.data;
-  if (!file || String(file.file_name || file.name || '') !== plan.filename ||
-      String(file.file_id || file.id || '').replace(/^f/, '') !== id) fail('PUBLIC_IDENTITY_MISMATCH');
-  const md5 = String(file.file_md5 || file.md5 || '').toLowerCase();
-  if (expected.md5 && /^[a-f0-9]{32}$/.test(md5) && md5 !== expected.md5) fail('REMOTE_CHECKSUM_MISMATCH');
   return { ...publicPlan(plan), fileId: id, fileSize: size, ctfileUrl: shareLink(row),
-    checksumVerified: Boolean(expected.md5 && md5 === expected.md5), verifiedAt: new Date().toISOString() };
+    checksumVerified: false, verifiedAt: new Date().toISOString() };
 }
 
 export function publicPlan(p) {
@@ -187,10 +181,7 @@ export async function reconcile({ plans, failures = [] }, adapter, options = {})
         catch { /* A stale or unavailable WebDAV receipt falls back to normal inventory. */ }
       }
       const records = verified ? [] : (await adapter.inventory(plan)).filter(r => remoteName(r) === plan.filename && !isFolder(r));
-      const verify = async (record, expected = {}) => {
-        const url = shareLink(record);
-        return verifyMetadata(plan, record, await adapter.publicInfo(url), expected);
-      };
+      const verify = async (record, expected = {}) => verifyInventoryMetadata(plan, record, expected);
       if (records.length && !republished) {
         stage = 'verification';
         // Prefer a known receipt when names collide, but do not trust it without checking the remote.

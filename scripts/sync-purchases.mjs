@@ -178,7 +178,7 @@ export function rateLimitedFetch(fetchImpl = fetch, { intervalMs = 1500, retries
   return async (url, options, retryable = true) => {
     const target = httpsUrl(url, true);
     if (!['rest.ctfile.com', 'webapi.ctfile.com'].includes(target.hostname)) fail('UNSUPPORTED_CTFILE_API_HOST');
-    const readEndpoint = target.pathname === '/getfile.php' || /^\/v1\/public\/(file|folder)\/list$/.test(target.pathname);
+    const readEndpoint = /^\/v1\/public\/(file|folder)\/list$/.test(target.pathname);
     retryable = retryable && readEndpoint;
     const previous = tail;
     let release;
@@ -383,19 +383,6 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
       }
     },
     refresh: (_plan, destination) => list(destination.id, 'file'),
-    async publicInfo(link) {
-      const share = httpsUrl(link, true);
-      const api = new URL('https://webapi.ctfile.com/getfile.php');
-      api.searchParams.set('path', share.pathname.split('/')[1]);
-      api.searchParams.set('f', share.pathname.split('/')[2]);
-      api.searchParams.set('passcode', share.searchParams.get('p') || '');
-      const response = await apiFetch(api, { headers: { Referer: link }, redirect: 'error', signal: AbortSignal.timeout(30000) });
-      const data = await jsonResponse(response);
-      // Share paths and passcodes stay out of logs; only the API verdict is diagnostic.
-      const code = String(data?.code ?? 'missing').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 20) || 'unknown';
-      console.log(`CTFILE_PUBLIC_HTTP status=${response.status} code=${code}`);
-      return data;
-    },
   };
 }
 

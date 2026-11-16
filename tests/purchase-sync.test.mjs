@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, access } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { SyncError, planPurchases, shareLink, verifyMetadata, listAllPages, reconcile, markdownReport } from '../scripts/purchase-sync-core.mjs';
+import { SyncError, planPurchases, shareLink, verifyInventoryMetadata, listAllPages, reconcile, markdownReport } from '../scripts/purchase-sync-core.mjs';
 import { downloadPackage, createAdapter, jsonResponse, httpsUrl } from '../scripts/sync-purchases.mjs';
 
 const app = (name = 'New Software', version = '1.0', arch = 'x86_64') => ({ name, internalName: name.replaceAll(' ', ''), version,
@@ -11,12 +11,11 @@ const feed = (...items) => ({ plugins: { item: items } });
 const plan = (name = 'New Software') => planPurchases(feed(app(name))).plans[0];
 const row = (p, id = '101', size = 1024) => ({ key: `f${id}`, name: p.filename, size,
   weblink: `https://url78.ctfile.com/f/59378-${id}-abcdef`, default_passcode: '1794' });
-const pub = r => ({ code: 200, file: { file_id: r.key.slice(1), file_name: r.name } });
 const md5 = 'd41d8cd98f00b204e9800998ecf8427e';
 function fake(plans, initial = []) {
   const rows = [...initial], counts = { uploads: 0, downloads: 0, cleanup: 0, folder: 0 };
   const adapter = {
-    inventory: async () => [...rows], publicInfo: async url => { const id = new URL(url).pathname.split('-')[1]; return pub(rows.find(r => r.key === `f${id}`)); },
+    inventory: async () => [...rows],
     download: async () => { counts.downloads++; return { fileSize: 1024, md5, path: '/fake' }; },
     ensureDestination: async () => { counts.folder++; return { id: '1' }; },
     upload: async p => { const id = String(200 + ++counts.uploads); rows.push(row(p, id)); return { fileId: id }; },
@@ -71,14 +70,13 @@ test('returns only API-provided canonical shares with passcode, no other query s
   assert.throws(() => shareLink({ weblink: 'https://ctfile.com.attacker.example/f/123' }), /MISSING_CANONICAL/);
   assert.throws(() => shareLink({ weblink: 'https://url78.ctfile.com/dir/123' }), /MISSING_CANONICAL/);
 });
-test('public filename, ID, byte size and available MD5 must match', () => {
+test('inventory filename, ID and byte size must match without public share lookups', () => {
   const p = plan(), r = row(p);
-  assert.equal(verifyMetadata(p, r, pub(r), { fileId: '101', fileSize: 1024 }).filename, p.filename);
-  assert.throws(() => verifyMetadata(p, r, pub(r), { fileId: '999' }), /RECEIPT/);
-  assert.throws(() => verifyMetadata(p, r, pub(r), { fileSize: 2048 }), /SIZE/);
-  assert.throws(() => verifyMetadata(p, r, { code: 401 }), /PUBLIC_SHARE/);
-  assert.throws(() => verifyMetadata(p, r, { code: 200, file: { file_id: 101, file_name: 'different' } }), /PUBLIC_IDENTITY/);
-  assert.throws(() => verifyMetadata(p, r, { ...pub(r), file: { ...pub(r).file, md5: '0'.repeat(32) } }, { md5 }), /CHECKSUM/);
+  assert.equal(verifyInventoryMetadata(p, r, { fileId: '101', fileSize: 1024 }).filename, p.filename);
+  assert.throws(() => verifyInventoryMetadata(p, r, { fileId: '999' }), /RECEIPT/);
+  assert.throws(() => verifyInventoryMetadata(p, r, { fileSize: 2048 }), /SIZE/);
+  assert.throws(() => verifyInventoryMetadata(p, { ...r, name: 'different.qpkg' }), /IDENTITY/);
+  assert.equal(verifyInventoryMetadata(p, r).checksumVerified, false);
 });
 test('paginated inventory passes default passcode to files and detects repeated pages', async () => {
   const p = plan();
@@ -107,12 +105,6 @@ test('lost upload acknowledgement is recovered by remote readback, no second upl
   f.adapter.upload = async (...args) => { await good(...args); throw new Error('lost response'); };
   assert.equal((await reconcile(desired, f.adapter)).complete, true);
   assert.equal(f.counts.uploads, 1);
-});
-test('public API failure is pending verification, not another upload', async () => {
-  const desired = planPurchases(feed(app())), f = fake(desired.plans, [row(desired.plans[0])]);
-  f.adapter.publicInfo = async () => ({ code: 500 });
-  const report = await reconcile(desired, f.adapter);
-  assert.equal(report.pending[0].stage, 'verification'); assert.equal(f.counts.uploads, 0);
 });
 test('inventory failure never masquerades as an empty remote folder', async () => {
   const desired = planPurchases(feed(app())), f = fake(desired.plans);
@@ -189,7 +181,7 @@ test('adapter scans historical nested folders with the file-list endpoint', asyn
       : body.folder_id === 'd2' && folder ? [{ key: 'd3', icon: 'folder', name: '2025-01' }]
       : body.folder_id === 'd3' && !folder ? [row(p)] : [];
     return Response.json({ code: 200, results: rows });
-  } });
+  }, requestIntervalMs: 0 });
   assert.equal((await adapter.inventory(p))[0].name, p.filename);
   assert.ok(calls.some(([url, id]) => url.endsWith('file/list') && id === 'd3'));
 });

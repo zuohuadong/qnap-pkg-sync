@@ -59,7 +59,6 @@ function harness(overrides = {}, configuration = {}) {
   adapter.download = async () => { counts.downloads++; return { fileSize: 1024, md5, path: '/fake' }; };
   adapter.cleanup = async () => { counts.cleanup++; };
   adapter.refresh = async () => { counts.refresh++; events.push('ct-refresh'); return rows; };
-  adapter.publicInfo = async () => ({ code: 200, file: { file_id: '101', file_name: rows[0]?.name } });
   adapter.pause = async () => {};
   return { adapter, counts, events, folders };
 }
