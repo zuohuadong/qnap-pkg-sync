@@ -23,6 +23,14 @@ export function httpsUrl(value, ctfileOnly = false) {
   return url;
 }
 
+/** WebDAV endpoints may live on a custom port, but never carry credentials in the URL. */
+export function webdavEndpoint(value) {
+  let url;
+  try { url = new URL(value); } catch { fail('INVALID_URL'); }
+  if (url.protocol !== 'https:' || url.username || url.password) fail('UNSAFE_URL');
+  return url;
+}
+
 export async function atomicJson(path, data) {
   await mkdir(resolve(path, '..'), { recursive: true });
   await writeFile(`${path}.tmp`, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
@@ -105,7 +113,7 @@ export function curlArgs(local, responsePath, { webdav, method = 'PUT', depth = 
 /** cURL config via stdin keeps signed URLs and WebDAV credentials out of process arguments/logs. */
 export async function curlTransfer(url, local, options = {}) {
   const { webdav, method = 'PUT' } = options;
-  httpsUrl(url, !webdav);
+  if (webdav) webdavEndpoint(url); else httpsUrl(url, true);
   const directory = local?.directory || await mkdtemp(join(tmpdir(), 'qnap-webdav-'));
   const responsePath = join(directory, 'upload-response.json');
   const args = curlArgs(local, responsePath, options);
@@ -227,7 +235,7 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
   const webdavPath = (relativePath, filename) => [webdavRoot, ...pathSegments(relativePath), ...pathSegments(filename)].filter(Boolean).join('/');
   function webdavUrl(path) {
     if (!env.WEBDAV_URL || !env.WEBDAV_USERNAME || !env.WEBDAV_PASSWORD) fail('WEBDAV_NOT_CONFIGURED');
-    const base = httpsUrl(env.WEBDAV_URL);
+    const base = webdavEndpoint(env.WEBDAV_URL);
     base.pathname = `${base.pathname.replace(/\/+$/, '')}/${path}`;
     base.search = ''; base.hash = '';
     return base.href;
