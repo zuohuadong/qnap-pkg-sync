@@ -46,6 +46,8 @@ QNAP 的 opaque signature 不一定是整个 QPKG 的 MD5；未识别格式不�
 `UPLOAD_AMBIGUOUS` 先等待 CTFile 回读，仅在 `UPLOAD_NOT_VERIFIED` 后回退一次。
 本次运行第一次 CTFile 上传失败后触发熔断，余下包直接使用 WebDAV，并记录
 `CTFILE_UPLOAD_DEGRADED switched=webdav`。`always` 跳过 CTFile 上传请求，`off` 只用 CTFile。
+`always` 还会用 `PROPFIND` 列目录来做存在性与大小核对，完全不调用 CTFile REST；
+只切换列表通道而保留 CTFile 上传时，可单独设置 `WEBDAV_INVENTORY=on`。
 
 WebDAV 自动逐级创建 `WEBDAV_ROOT_PATH/<产品目录>/<YYYY-MM>`。PUT 使用 `If-None-Match: *`，
 不会覆盖既有同名文件；412 视为已存在，但仍需 `PROPFIND Depth: 0` 验证名称和精确字节大小。

@@ -109,6 +109,15 @@ export function publicPlan(p) {
   return { productName: p.productName, version: p.version, architecture: p.architecture, filename: p.filename };
 }
 
+export function verifyWebdavInventory(plan, path, remote, expected = {}) {
+  if (typeof path !== 'string' || path.split('/').at(-1) !== plan.filename ||
+      !/^[A-Za-z0-9._~!$&'()*+,;=@%/-]+$/.test(path) || path.startsWith('/') || path.includes('//')) fail('WEBDAV_UPLOAD_NOT_VERIFIED');
+  if (!remote || !Number.isSafeInteger(remote.size)) fail('WEBDAV_UPLOAD_NOT_VERIFIED');
+  if (expected.fileSize != null && remote.size !== expected.fileSize) fail('WEBDAV_SIZE_MISMATCH');
+  return { ...publicPlan(plan), storage: 'webdav', webdavPath: path, fileSize: remote.size,
+    ctfileUrl: undefined, checksumVerified: false, verifiedAt: new Date().toISOString() };
+}
+
 export function verifyWebdavMetadata(plan, path, remote, expected) {
   if (typeof path !== 'string' || path.split('/').at(-1) !== plan.filename ||
       !/^[A-Za-z0-9._~!$&'()*+,;=@%/-]+$/.test(path) || path.startsWith('/') || path.includes('//')) fail('WEBDAV_UPLOAD_NOT_VERIFIED');
@@ -181,7 +190,9 @@ export async function reconcile({ plans, failures = [] }, adapter, options = {})
         catch { /* A stale or unavailable WebDAV receipt falls back to normal inventory. */ }
       }
       const records = verified ? [] : (await adapter.inventory(plan)).filter(r => remoteName(r) === plan.filename && !isFolder(r));
-      const verify = async (record, expected = {}) => verifyInventoryMetadata(plan, record, expected);
+      const verify = async (record, expected = {}) => record?.storage === 'webdav'
+        ? verifyWebdavInventory(plan, record.path, { size: record.size }, expected)
+        : verifyInventoryMetadata(plan, record, expected);
       if (records.length && !republished) {
         stage = 'verification';
         // Prefer a known receipt when names collide, but do not trust it without checking the remote.

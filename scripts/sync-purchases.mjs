@@ -85,7 +85,7 @@ export function curlConfig(url, webdav) {
   return `url = ${JSON.stringify(url)}\n${webdav ? `user = ${JSON.stringify(`${webdav.username}:${webdav.password}`)}\n` : ''}`;
 }
 
-export function curlArgs(local, responsePath, { webdav, method = 'PUT', timeoutSeconds = 1200 } = {}) {
+export function curlArgs(local, responsePath, { webdav, method = 'PUT', depth = 0, timeoutSeconds = 1200 } = {}) {
   const args = ['--disable', '--config', '-', '--silent', '--show-error', '--fail-with-body',
     '--proto', '=https', '--connect-timeout', '30', '--max-time', String(timeoutSeconds),
     '--speed-limit', '1024', '--speed-time', '90', '--header', 'Expect:', '--output', responsePath,
@@ -93,7 +93,7 @@ export function curlArgs(local, responsePath, { webdav, method = 'PUT', timeoutS
   if (webdav) {
     args.push('--request', method);
     if (method === 'PUT') args.push('--upload-file', local.path, '--header', 'If-None-Match: *');
-    if (method === 'PROPFIND') args.push('--header', 'Depth: 0');
+    if (method === 'PROPFIND') args.push('--header', `Depth: ${depth}`);
   } else {
     const filename = local.path.split('/').pop();
     args.push('--form-string', `name=${filename}`, '--form-string', `filesize=${local.fileSize}`,
@@ -232,7 +232,7 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
     base.search = ''; base.hash = '';
     return base.href;
   }
-  const webdavOptions = method => ({ method, webdav: { username: env.WEBDAV_USERNAME, password: env.WEBDAV_PASSWORD } });
+  const webdavOptions = (method, depth = 0) => ({ method, depth, webdav: { username: env.WEBDAV_USERNAME, password: env.WEBDAV_PASSWORD } });
   async function webdavUpload(file, url) {
     const response = await transfer(url, file, webdavOptions('PUT'));
     if (response.status !== 412 && (response.status < 200 || response.status >= 300)) fail('WEBDAV_UPLOAD_FAILED');
@@ -260,6 +260,32 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
     }
     fail('WEBDAV_UPLOAD_NOT_VERIFIED');
   }
+  async function webdavList(url, depth = 1) {
+    let response;
+    try { response = await transfer(url, undefined, webdavOptions('PROPFIND', depth)); }
+    catch { fail('WEBDAV_LIST_FAILED'); }
+    if (response.status === 404) return [];
+    if (response.status !== 207 || /<!DOCTYPE|<!ENTITY/i.test(response.body)) fail('WEBDAV_LIST_FAILED');
+    let multistatus;
+    try {
+      multistatus = await parseStringPromise(response.body, { explicitArray: false, tagNameProcessors: [processors.stripPrefix] });
+    } catch { fail('WEBDAV_LIST_FAILED'); }
+    const entries = multistatus?.multistatus?.response;
+    const self = new URL(url).href;
+    return (Array.isArray(entries) ? entries : [entries]).filter(Boolean).flatMap(entry => {
+      let href;
+      try { href = new URL(entry.href, url).href; } catch { return []; }
+      if (href === self) return [];
+      const properties = Array.isArray(entry.propstat) ? entry.propstat : [entry.propstat];
+      const prop = properties.find(p => /^HTTP\/[\d.]+ 200(?:\s|$)/.test(p?.status))?.prop || properties[0]?.prop || {};
+      const pathname = decodeURIComponent(new URL(href).pathname);
+      const name = pathname.split('/').filter(Boolean).pop() || '';
+      const size = Number(prop.getcontentlength);
+      return [{ href, name, folder: prop.resourcetype?.collection !== undefined || /\/$/.test(entry.href),
+        size: Number.isSafeInteger(size) && size >= 0 ? size : undefined }];
+    });
+  }
+
   async function webdavEnsureFolder(url) {
     const base = new URL(webdavUrl(''));
     const target = new URL(url);
@@ -336,6 +362,42 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
       return state.files;
     } catch (error) { products.set(plan.folder, { error }); throw error; }
   }
+  const webdavEnabled = fallback === 'always' || env.WEBDAV_INVENTORY === 'on';
+  function webdavRelative(href) {
+    const base = new URL(webdavUrl(''));
+    const target = new URL(href);
+    if (target.origin !== base.origin || !target.pathname.startsWith(base.pathname)) fail('INVALID_WEBDAV_PATH');
+    return decodeURIComponent(target.pathname.slice(base.pathname.length)).replace(/^\/+/, '');
+  }
+  async function inventoryWebdav(plan) {
+    if (products.has(plan.folder)) {
+      const entry = products.get(plan.folder);
+      if (entry.error) throw entry.error;
+      return entry.files;
+    }
+    try {
+      const rootEntries = (await webdavList(webdavUrl(''), 1)).filter(entry => entry.folder);
+      const exact = rootEntries.filter(entry => entry.name === plan.folder);
+      const matches = exact.length ? exact : rootEntries.filter(entry => entry.name.toLowerCase() === plan.folder.toLowerCase());
+      if (matches.length > 1) fail('AMBIGUOUS_PRODUCT_FOLDER');
+      const files = [];
+      if (matches.length) {
+        const todo = [matches[0].href], visited = new Set();
+        while (todo.length) {
+          const url = todo.shift();
+          if (visited.has(url) || visited.size >= 500) fail('INVALID_FOLDER_TREE');
+          visited.add(url);
+          for (const entry of await webdavList(url, 1)) {
+            if (entry.folder) todo.push(entry.href);
+            else files.push({ storage: 'webdav', path: webdavRelative(entry.href), name: entry.name, size: entry.size });
+          }
+        }
+      }
+      const state = { files };
+      products.set(plan.folder, state);
+      return state.files;
+    } catch (error) { products.set(plan.folder, { error }); throw error; }
+  }
   async function ensureFolder(parent, name) {
     let rows = await list(parent, 'folder');
     let found = uniqueFolder(rows, name);
@@ -349,7 +411,7 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
     return folderId(remoteId(found));
   }
   return {
-    inventory,
+    inventory: webdavEnabled ? inventoryWebdav : inventory,
     webdavUpload, webdavStat, webdavEnsureFolder, webdavPath, verifyWebdav,
     async fallbackUpload(plan, local, destination) {
       if (fallback === 'off') fail('UPLOAD_NOT_VERIFIED');

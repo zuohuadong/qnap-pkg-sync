@@ -63,6 +63,27 @@ function harness(overrides = {}, configuration = {}) {
   return { adapter, counts, events, folders };
 }
 
+test('WEBDAV_FALLBACK=always lists and verifies purchases over PROPFIND only', async () => {
+  const plans = desired('One');
+  const listing = (path, entries) => `<d:multistatus xmlns:d="DAV:">${entries.map(([name, size, folder]) => `<d:response><d:href>${path}${encodeURIComponent(name)}${folder ? '/' : ''}</d:href><d:propstat><d:prop><d:resourcetype>${folder ? '<d:collection/>' : ''}</d:resourcetype>${size != null ? `<d:getcontentlength>${size}</d:getcontentlength>` : ''}</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`).join('')}</d:multistatus>`;
+  const adapter = createAdapter({ ...env, WEBDAV_FALLBACK: 'always' }, {
+    requestIntervalMs: 0,
+    fetchImpl: async () => assert.fail('CTFile API must not be called'),
+    transfer: async (url, local, options) => {
+      assert.equal(options.method, 'PROPFIND');
+      const path = decodeURIComponent(new URL(url).pathname).replace(/\/$/, '');
+      if (path === '/base folder') return { status: 207, body: listing('/base folder/', [['One', null, true]]) };
+      if (path === '/base folder/One') return { status: 207, body: listing('/base folder/One/', [['2026-11', null, true]]) };
+      if (path === '/base folder/One/2026-11') return { status: 207, body: listing('/base folder/One/2026-11/', [[plans.plans[0].filename, 1024, false]]) };
+      return { status: 404, body: '' };
+    },
+  });
+  const report = await reconcile(plans, adapter);
+  assert.equal(report.pending.length, 0, JSON.stringify(report.pending));
+  assert.equal(report.verified[0].storage, 'webdav');
+  assert.ok(report.verified[0].webdavPath.endsWith(plans.plans[0].filename));
+});
+
 test('upload URL failure uses verified WebDAV, persists receipts, and opens the per-run circuit', async t => {
   const logs = [];
   t.mock.method(console, 'log', line => logs.push(line));
