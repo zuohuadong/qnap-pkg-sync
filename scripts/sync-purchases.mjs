@@ -201,8 +201,8 @@ export function rateLimitedFetch(fetchImpl = fetch, { intervalMs = 1500, retries
         const requested = value && /^\d+$/.test(value) ? Number(value) * 1000 : value ? Date.parse(value) - now() : NaN;
         await response.body?.cancel();
         if (requested > 300000) fail('CTFILE_RETRY_DEFERRED');
-        const delay = Math.max(intervalMs, Number.isFinite(requested) ? requested : response.status === 429 ? 30000 * (attempt + 1) : 2000 * 2 ** attempt);
-        console.log(`CTFILE_API_RETRY status=${response.status} attempt=${attempt + 1}`);
+        const delay = Math.max(intervalMs, Math.min(10000, Number.isFinite(requested) ? requested : 2000 * 2 ** attempt));
+        console.log(`CTFILE_API_RETRY status=${response.status} attempt=${attempt + 1} path=${target.pathname} delayMs=${delay}`);
         await pause(delay);
       }
     } finally { release(); }
