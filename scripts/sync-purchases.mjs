@@ -271,7 +271,7 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
   async function webdavList(url, depth = 1) {
     const started = Date.now();
     let response;
-    try { response = await transfer(url, undefined, webdavOptions('PROPFIND', depth, 120)); }
+    try { response = await transfer(url, undefined, webdavOptions('PROPFIND', depth, 30)); }
     catch { console.log('WEBDAV_LIST_FAILED transport'); fail('WEBDAV_LIST_FAILED'); }
     if (response.status === 404) return [];
     if (response.status !== 207 || /<!DOCTYPE|<!ENTITY/i.test(response.body)) {
@@ -383,6 +383,11 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
     if (target.origin !== base.origin || !target.pathname.startsWith(base.pathname)) fail('INVALID_WEBDAV_PATH');
     return decodeURIComponent(target.pathname.slice(base.pathname.length)).replace(/^\/+/, '');
   }
+  let rootListing;
+  const webdavRootFolders = () => {
+    if (!rootListing) rootListing = webdavList(webdavUrl(''), 1);
+    return rootListing;
+  };
   async function inventoryWebdav(plan) {
     if (products.has(plan.folder)) {
       const entry = products.get(plan.folder);
@@ -390,7 +395,7 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
       return entry.files;
     }
     try {
-      const rootEntries = (await webdavList(webdavUrl(''), 1)).filter(entry => entry.folder);
+      const rootEntries = (await webdavRootFolders()).filter(entry => entry.folder);
       const exact = rootEntries.filter(entry => entry.name === plan.folder);
       const matches = exact.length ? exact : rootEntries.filter(entry => entry.name.toLowerCase() === plan.folder.toLowerCase());
       if (matches.length > 1) fail('AMBIGUOUS_PRODUCT_FOLDER');
