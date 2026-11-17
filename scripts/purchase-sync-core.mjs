@@ -241,6 +241,10 @@ export async function reconcile({ plans, failures = [] }, adapter, options = {})
       report.verified.push(verified);
       pending.delete(plan.key);
     } catch (error) {
+      if (!(error instanceof SyncError)) {
+        const reason = `${error?.name || ''} ${error?.message || ''}`.replace(/https?:\/\/\S+/g, '[url]').slice(0, 80);
+        console.log(`PACKAGE_FAILED stage=${stage} ${reason.trim()}`);
+      }
       pending.set(plan.key, { ...publicPlan(plan), stage, error: error instanceof SyncError ? error.code : 'OPERATION_FAILED' });
     } finally {
       if (local) await adapter.cleanup(local).catch(() => {});
