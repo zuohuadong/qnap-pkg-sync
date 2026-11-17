@@ -136,12 +136,13 @@ async function verifyCtfileUpload(context, adapter, verify) {
     if (attempt) await (adapter.pause || (ms => new Promise(r => setTimeout(r, ms))))(2000 * attempt);
     try {
       const candidates = (await adapter.refresh(plan, destination)).filter(r => remoteName(r) === plan.filename && !isFolder(r));
+      if (!candidates.length) console.log(`UPLOAD_VERIFY_MISS attempt=${attempt + 1} filename=${plan.filename}`);
       for (const candidate of candidates) {
         // Without a receipt, an old same-name revision cannot confirm a new upload.
         if (republished && !receipt?.fileId && records.some(r => remoteId(r) === remoteId(candidate))) continue;
-        try { return await verify(candidate, expected); } catch (error) { lastError = error; }
+        try { return await verify(candidate, expected); } catch (error) { console.log(`UPLOAD_VERIFY_MISMATCH ${error?.code || 'unknown'}`); lastError = error; }
       }
-    } catch (error) { lastError = error; }
+    } catch (error) { console.log(`UPLOAD_REFRESH_FAILED ${error?.code || 'unknown'}`); lastError = error; }
   }
   throw lastError || new SyncError('UPLOAD_NOT_VERIFIED');
 }
@@ -216,6 +217,7 @@ export async function reconcile({ plans, failures = [] }, adapter, options = {})
         try { receipt = await adapter.upload(plan, local, destination); }
         catch (error) {
           if (error instanceof SyncError && error.code.startsWith('WEBDAV_')) throw error;
+          console.log(`UPLOAD_ATTEMPT_FAILED ${error?.code || 'unknown'}`);
           // A lost CTFile acknowledgement is resolved by read-back, not another upload.
         }
         stage = 'verification';
