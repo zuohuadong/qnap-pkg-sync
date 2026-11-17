@@ -131,11 +131,11 @@ export async function curlTransfer(url, local, options = {}) {
     child.stdin.end(curlConfig(url, webdav));
     const code = await completed;
     const match = output.trim().match(/^(\d{3}) (\d+)$/);
-    if (spawnFailed) fail(webdav ? 'WEBDAV_REQUEST_FAILED' : 'CURL_UNAVAILABLE');
-    if (!match) fail(webdav ? 'WEBDAV_REQUEST_FAILED' : 'UPLOAD_AMBIGUOUS');
+    if (spawnFailed) { console.log(`CURL_EXIT spawn_failed method=${method}`); fail(webdav ? 'WEBDAV_REQUEST_FAILED' : 'CURL_UNAVAILABLE'); }
+    if (!match) { console.log(`CURL_EXIT code=${code} no_output method=${method}`); fail(webdav ? 'WEBDAV_REQUEST_FAILED' : 'UPLOAD_AMBIGUOUS'); }
     const status = Number(match[1]), sent = Number(match[2]);
     if (webdav) {
-      if (code !== 0 && code !== 22) fail('WEBDAV_REQUEST_FAILED');
+      if (code !== 0 && code !== 22) { console.log(`CURL_EXIT code=${code} status=${status} method=${method}`); fail('WEBDAV_REQUEST_FAILED'); }
       return { status, body: method === 'PROPFIND' ? await readFile(responsePath, 'utf8') : '' };
     }
     if (code !== 0 || status < 200 || status >= 300) fail(sent ? 'UPLOAD_AMBIGUOUS' : 'UPLOAD_NOT_SENT');
@@ -518,5 +518,9 @@ export async function main(env = process.env, { fetchImpl = fetch, pause } = {})
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch(() => { console.error('SYNC_FATAL_ERROR'); process.exitCode = 1; });
+  const exit = code => process.stdout.write('', () => process.exit(code));
+  main().then(() => exit(process.exitCode || 0)).catch(() => {
+    console.error('SYNC_FATAL_ERROR');
+    exit(1);
+  });
 }
