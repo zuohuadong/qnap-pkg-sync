@@ -272,7 +272,7 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
     const started = Date.now();
     let response;
     try { response = await transfer(url, undefined, webdavOptions('PROPFIND', depth, 30)); }
-    catch { console.log('WEBDAV_LIST_FAILED transport'); fail('WEBDAV_LIST_FAILED'); }
+    catch (error) { console.log(`WEBDAV_LIST_FAILED ${error?.code || 'transport'}`); fail('WEBDAV_LIST_FAILED'); }
     if (response.status === 404) return [];
     if (response.status !== 207 || /<!DOCTYPE|<!ENTITY/i.test(response.body)) {
       console.log(`WEBDAV_LIST_FAILED status=${response.status}`);
