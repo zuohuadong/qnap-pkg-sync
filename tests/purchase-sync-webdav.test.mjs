@@ -66,7 +66,7 @@ function harness(overrides = {}, configuration = {}) {
 test('WEBDAV_FALLBACK=always lists and verifies purchases over PROPFIND only', async () => {
   const plans = desired('One');
   const listing = (path, entries) => `<d:multistatus xmlns:d="DAV:">${entries.map(([name, size, folder]) => `<d:response><d:href>${path}${encodeURIComponent(name)}${folder ? '/' : ''}</d:href><d:propstat><d:prop><d:resourcetype>${folder ? '<d:collection/>' : ''}</d:resourcetype>${size != null ? `<d:getcontentlength>${size}</d:getcontentlength>` : ''}</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`).join('')}</d:multistatus>`;
-  const adapter = createAdapter({ ...env, WEBDAV_FALLBACK: 'always' }, {
+  const adapter = createAdapter({ ...env, WEBDAV_ROOT_PATH: '/', WEBDAV_FALLBACK: 'always' }, {
     requestIntervalMs: 0,
     fetchImpl: async () => assert.fail('CTFile API must not be called'),
     transfer: async (url, local, options) => {

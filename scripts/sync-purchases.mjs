@@ -112,7 +112,7 @@ export function curlArgs(local, responsePath, { webdav, method = 'PUT', depth = 
 
 /** cURL config via stdin keeps signed URLs and WebDAV credentials out of process arguments/logs. */
 export async function curlTransfer(url, local, options = {}) {
-  const { webdav, method = 'PUT' } = options;
+  const { webdav, method = 'PUT', timeoutSeconds = 1200 } = options;
   if (webdav) webdavEndpoint(url); else httpsUrl(url, true);
   const directory = local?.directory || await mkdtemp(join(tmpdir(), 'qnap-webdav-'));
   const responsePath = join(directory, 'upload-response.json');
@@ -383,14 +383,14 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
   }
   const webdavEnabled = fallback === 'always' || env.WEBDAV_INVENTORY === 'on';
   function webdavRelative(href) {
-    const base = new URL(webdavUrl(''));
+    const base = new URL(webdavUrl(webdavRoot));
     const target = new URL(href);
     if (target.origin !== base.origin || !target.pathname.startsWith(base.pathname)) fail('INVALID_WEBDAV_PATH');
     return decodeURIComponent(target.pathname.slice(base.pathname.length)).replace(/^\/+/, '');
   }
   let rootListing;
   const webdavRootFolders = () => {
-    if (!rootListing) rootListing = webdavList(webdavUrl(''), 1);
+    if (!rootListing) rootListing = webdavList(webdavUrl(webdavRoot), 1);
     return rootListing;
   };
   async function inventoryWebdav(plan) {
