@@ -270,9 +270,14 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
   }
   async function webdavList(url, depth = 1) {
     const started = Date.now();
+    console.log(`WEBDAV_LIST_START depth=${depth} path=${new URL(url).pathname.slice(0, 80)}`);
     let response;
     try { response = await transfer(url, undefined, webdavOptions('PROPFIND', depth, 30)); }
-    catch (error) { console.log(`WEBDAV_LIST_FAILED ${error?.code || 'transport'}`); fail('WEBDAV_LIST_FAILED'); }
+    catch (error) {
+      const reason = String(error?.code || error?.message || 'transport').replace(/https?:\/\/\S+/g, '[url]').slice(0, 60);
+      console.log(`WEBDAV_LIST_FAILED ${reason}`);
+      fail('WEBDAV_LIST_FAILED');
+    }
     if (response.status === 404) return [];
     if (response.status !== 207 || /<!DOCTYPE|<!ENTITY/i.test(response.body)) {
       console.log(`WEBDAV_LIST_FAILED status=${response.status}`);
