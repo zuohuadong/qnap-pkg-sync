@@ -40,7 +40,10 @@
 QNAP 的 opaque signature 不一定是整个 QPKG 的 MD5；未识别格式不会被宣称为数字签名验证成功。
 来源签名只有明确的完整 MD5 格式才强制比对。登录态列表核对（名称、ID、大小）不等于在真实 NAS 上安装验收，也不保证公开分享可访问。
 
-使用有时限的 cURL 上传，签名 URL 和 WebDAV 认证仅通过 stdin 传递。
+上传默认使用 Bun 的 `fetch` + multipart `FormData`（`Bun.file` 惰性流式读取，不整包入内存），
+签名 URL 不出现在命令行参数中；仅当请求确认未发出（`UPLOAD_NOT_SENT`）时才以系统 cURL 重试一次，
+并记录 `UPLOAD_ENGINE_FALLBACK bun->curl`。`UPLOAD_ENGINE=bun|curl` 可强制选择通道，默认 `bun`。
+cURL 通道仍使用有时限的配置，签名 URL 和 WebDAV 认证只通过 stdin 传递。
 `WEBDAV_FALLBACK` 支持 `on-failure`（默认）、`always` 和 `off`。`on-failure` 在 CTFile
 上传地址请求失败（`UPLOAD_URL_REQUEST_FAILED`）或确认未发送（`UPLOAD_NOT_SENT`）时立即回退；
 `UPLOAD_AMBIGUOUS` 先等待 CTFile 回读，仅在 `UPLOAD_NOT_VERIFIED` 后回退一次。

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile, rename, rm, stat, appendFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile, rename, rm, appendFile } from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -110,6 +110,40 @@ export function curlArgs(local, responsePath, { webdav, method = 'PUT', depth = 
   return args;
 }
 
+/** Parses the CTFile upload receipt shared by both transports. */
+export function parseUploadReceipt(text) {
+  if (text.length > 1024 * 1024) fail('INVALID_UPLOAD_RESPONSE');
+  let data;
+  try { data = JSON.parse(text); } catch { fail('INVALID_UPLOAD_RESPONSE'); }
+  const item = Array.isArray(data) ? data[0] : data.files?.[0] ?? data.data ?? data;
+  const id = remoteId(item).replace(/^f/, '');
+  if (!/^\d+$/.test(id)) fail('INVALID_UPLOAD_RECEIPT');
+  return { fileId: id };
+}
+
+/** Bun streams Bun.file lazily; the Node fallback is only used by local test runs. */
+async function uploadBlob(path) {
+  if (typeof Bun !== 'undefined' && Bun.file) return Bun.file(path);
+  return new Blob([await readFile(path)]);
+}
+
+/** Uploads through Bun's own fetch/FormData; cURL remains the fallback transport. */
+export async function bunUpload(url, local, { timeoutSeconds = 1200, fetchImpl = fetch } = {}) {
+  httpsUrl(url, true);
+  const filename = local.path.split('/').pop();
+  const form = new FormData();
+  form.append('name', filename);
+  form.append('filesize', String(local.fileSize));
+  form.append('file', await uploadBlob(local.path), filename);
+  let response;
+  try {
+    response = await fetchImpl(url, { method: 'POST', body: form, redirect: 'error', signal: AbortSignal.timeout(timeoutSeconds * 1000) });
+  } catch { fail('UPLOAD_NOT_SENT'); }
+  const text = await response.text().catch(() => '');
+  if (response.status < 200 || response.status >= 300) fail('UPLOAD_AMBIGUOUS');
+  return parseUploadReceipt(text);
+}
+
 /** cURL config via stdin keeps signed URLs and WebDAV credentials out of process arguments/logs. */
 export async function curlTransfer(url, local, options = {}) {
   const { webdav, method = 'PUT', timeoutSeconds = 1200 } = options;
@@ -139,13 +173,7 @@ export async function curlTransfer(url, local, options = {}) {
       return { status, body: method === 'PROPFIND' ? await readFile(responsePath, 'utf8') : '' };
     }
     if (code !== 0 || status < 200 || status >= 300) fail(sent ? 'UPLOAD_AMBIGUOUS' : 'UPLOAD_NOT_SENT');
-    if ((await stat(responsePath)).size > 1024 * 1024) fail('INVALID_UPLOAD_RESPONSE');
-    let data;
-    try { data = JSON.parse(await readFile(responsePath, 'utf8')); } catch { fail('INVALID_UPLOAD_RESPONSE'); }
-    const item = Array.isArray(data) ? data[0] : data.files?.[0] ?? data.data ?? data;
-    const id = remoteId(item).replace(/^f/, '');
-    if (!/^\d+$/.test(id)) fail('INVALID_UPLOAD_RECEIPT');
-    return { fileId: id };
+    return parseUploadReceipt(await readFile(responsePath, 'utf8'));
   } finally {
     clearTimeout(timer);
     if (!local?.directory) await rm(directory, { recursive: true, force: true });
@@ -224,6 +252,11 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
   const products = new Map();
   const fallback = env.WEBDAV_FALLBACK || 'on-failure';
   if (!['on-failure', 'always', 'off'].includes(fallback)) fail('INVALID_WEBDAV_FALLBACK');
+  const uploadEngine = (env.UPLOAD_ENGINE || 'bun').toLowerCase();
+  if (!['bun', 'curl'].includes(uploadEngine)) fail('INVALID_UPLOAD_ENGINE');
+  // Injecting a custom transfer (tests) keeps that transport; otherwise Bun uploads with cURL as backup.
+  const sendUpload = transfer !== curlTransfer ? transfer
+    : uploadEngine === 'curl' ? curlTransfer : (url, local) => bunUpload(url, local, { fetchImpl });
   let uploadProvider = fallback === 'always' ? 'webdav' : 'ctfile';
   const webdavFolders = new Set();
   let root;
@@ -460,7 +493,15 @@ export function createAdapter(env, { fetchImpl = fetch, transfer = curlTransfer,
         try { data = await request('file/upload', { folder_id: folderKey(destination.id), name: plan.filename, size: String(local.fileSize), checksum: local.md5 }); }
         catch { fail('UPLOAD_URL_REQUEST_FAILED'); }
         if (String(data.code) !== '200' || !data.upload_url) fail('UPLOAD_URL_REQUEST_FAILED');
-        return await transfer(data.upload_url, local);
+        try { return await sendUpload(data.upload_url, local); }
+        catch (error) {
+          // Only a request that never left the process is safe to replay through cURL.
+          if (sendUpload !== transfer && error?.code === 'UPLOAD_NOT_SENT') {
+            console.log('UPLOAD_ENGINE_FALLBACK bun->curl');
+            return await transfer(data.upload_url, local);
+          }
+          throw error;
+        }
       }
       catch (error) {
         degradeUploads();

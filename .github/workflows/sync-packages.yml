@@ -48,6 +48,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.5
       - run: bun install --frozen-lockfile
       - name: New reconciliation and existing regression tests
         run: |
@@ -70,6 +72,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.5
       - run: bun install --frozen-lockfile
       - name: Read workflow activation state
         env:
@@ -99,6 +103,7 @@ jobs:
           WEBDAV_ROOT_PATH: /qnaporg-github
           WEBDAV_FALLBACK: ${{ vars.WEBDAV_FALLBACK || 'on-failure' }}
           WEBDAV_INVENTORY: ${{ vars.WEBDAV_INVENTORY || 'off' }}
+          UPLOAD_ENGINE: ${{ vars.UPLOAD_ENGINE || 'bun' }}
         run: bun run sync
       - name: Save receipts even after partial failure
         if: always() && env.SYNC_DRY_RUN != 'true'
